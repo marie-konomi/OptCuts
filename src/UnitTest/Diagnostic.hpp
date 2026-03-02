@@ -17,6 +17,7 @@
 #include <igl/harmonic.h>
 
 #include <cstdio>
+#include <sstream>
 
 extern std::string outputFolderPath;
 extern igl::opengl::glfw::Viewer viewer;
@@ -446,6 +447,22 @@ namespace OptCuts{
                                 double l2Stretch, lInfStretch, l2Shear, lInfCompress;
                                 infoFile >> l2Stretch >> lInfStretch >> l2Shear >> lInfCompress;
                                 fprintf(outFile, "%lf, %lf, %lf, ", l2Stretch, lInfStretch, l2Shear);
+                                
+                                double sigma1_max = 0.0, sigma2_max = 0.0;
+                                infoFile >> bypass;
+                                if(bypass == "initialSeams") {
+                                    int initSeamsRows;
+                                    infoFile >> initSeamsRows;
+                                    std::string line;
+                                    while(std::getline(infoFile, line)) {
+                                        if(line.size() >= 12 && line.substr(0, 12) == "sigma_actual") {
+                                            std::istringstream iss(line.substr(12));
+                                            iss >> sigma1_max >> sigma2_max;
+                                            break;
+                                        }
+                                    }
+                                }
+                                fprintf(outFile, "%lf, %lf, ", sigma1_max, sigma2_max);
                                 
                                 fprintf(outFile, "\"%s\"", buf);
                                 

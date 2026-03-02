@@ -2,6 +2,8 @@
 #include "IglUtils.hpp"
 #include "Optimizer.hpp"
 #include "SymDirichletEnergy.hpp"
+#include "SigmaBoundEnergy.hpp"
+#include "SigmaSmoothEnergy.hpp"
 #include "GIF.hpp"
 #include "Timer.hpp"
 
@@ -58,6 +60,8 @@ int initCutOption = 0;
 bool outerLoopFinished = false;
 double upperBound = 4.1;
 const double convTol_upperBound = 1.0e-3;
+double sigma1_bound = 0.0;
+double sigma2_bound = 0.0;
 
 std::vector<std::pair<double, double>> energyChanges_bSplit, energyChanges_iSplit, energyChanges_merge;
 std::vector<std::vector<int>> paths_bSplit, paths_iSplit, paths_merge;
@@ -382,7 +386,9 @@ void saveInfoForPresent(const std::string fileName = "info.txt")
     
     file << "initialSeams " << triSoup[channel_result]->initSeams.rows() << std::endl;
     file << triSoup[channel_result]->initSeams << std::endl;
-    
+    double actual_max_sigma1 = 0.0, actual_max_sigma2 = 0.0;
+    OptCuts::SigmaBoundEnergy::getMaxSingularValues(*triSoup[channel_result], actual_max_sigma1, actual_max_sigma2);
+    file << "sigma_actual " << actual_max_sigma1 << " " << actual_max_sigma2 << std::endl;
     file.close();
 }
 
@@ -876,6 +882,13 @@ bool updateLambda_stationaryV(bool cancelMomentum = true, bool checkConvergence 
     if(energyParams[0] < eps_lambda) {
         energyParams[0] = eps_lambda;
     }
+    // Sync E_smooth and SigmaBound weights with E_d (same dual update)
+    if(energyParams.size() > 1) {
+        energyParams[1] = energyParams[0];
+    }
+    if(energyParams.size() > 2) {
+        energyParams[2] = energyParams[0];
+    }
     
     optimizer->updateEnergyData(true, false, false);
     
@@ -1278,9 +1291,17 @@ int main(int argc, char *argv[])
         bijectiveParam = std::stoi(argv[7]);
         std::cout << "bijectivity " << (bijectiveParam ? "ON" : "OFF") << std::endl;
     }
-    
     if(argc > 8) {
-        initCutOption = std::stoi(argv[8]);
+        sigma1_bound = std::stod(argv[8]);
+    }
+    if(argc > 9) {
+        sigma2_bound = std::stod(argv[9]);
+    }
+    if(argc > 10) {
+        initCutOption = std::stoi(argv[10]);
+    }
+    if(sigma1_bound > 0.0 || sigma2_bound > 0.0) {
+        std::cout << "Sigma bound constraint: sigma1 <= " << sigma1_bound << ", sigma2 <= " << sigma2_bound << std::endl;
     }
     switch(initCutOption) {
         case 0:
@@ -1299,11 +1320,11 @@ int main(int argc, char *argv[])
     }
     
     std::string folderTail = "";
-    if(argc > 9) {
-        if(argv[9][0] != '_') {
+    if(argc > 11) {
+        if(argv[11][0] != '_') {
             folderTail += '_';
         }
-        folderTail += argv[9];
+        folderTail += argv[11];
     }
 
     //////////////////////////////////
@@ -1568,7 +1589,14 @@ int main(int argc, char *argv[])
     texScale = 10.0 / (triSoup[0]->bbox.row(1) - triSoup[0]->bbox.row(0)).maxCoeff();
     energyParams.emplace_back(1.0 - lambda_init);
     energyTerms.emplace_back(new OptCuts::SymDirichletEnergy());
-    
+    energyParams.emplace_back(1.0 - lambda_init);
+    energyTerms.emplace_back(new OptCuts::SigmaSmoothEnergy());
+    if(sigma1_bound > 0.0 || sigma2_bound > 0.0) {
+        std::cout << "Sigma bound constraint: sigma1 <= " << sigma1_bound << ", sigma2 <= " << sigma2_bound << std::endl;
+        energyParams.emplace_back(1.0-lambda_init);
+        energyTerms.emplace_back(new OptCuts::SigmaBoundEnergy(sigma1_bound, sigma2_bound));
+    }
+
     optimizer = new OptCuts::Optimizer(*triSoup[0], energyTerms, energyParams, 0, false, bijectiveParam && !rand1PInitCut); // for random one point initial cut, don't need air meshes in the beginning since it's impossible for a quad to intersect itself
     
     optimizer->precompute();

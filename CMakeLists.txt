@@ -44,7 +44,9 @@ file(GLOB SRCFILES
   src/Energy/Energy.cpp
   src/Energy/ARAPEnergy.cpp
   src/Energy/SymDirichletEnergy.cpp
-  
+  src/Energy/SigmaBoundEnergy.cpp
+  src/Energy/SigmaSmoothEnergy.cpp
+
   src/Utils/IglUtils.cpp
   
   src/LinSysSolver/EigenLibSolver.cpp
