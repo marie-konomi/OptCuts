@@ -151,7 +151,7 @@ void updateViewerData_seam(Eigen::MatrixXd& V, Eigen::MatrixXi& F, Eigen::Matrix
         color.rowwise() = Eigen::RowVector3d(1.0, 0.5, 0.0);
         
         seamColor.resize(0, 3);
-        double seamThickness = (viewUV ? (triSoup[viewChannel]->virtualRadius * 0.0007 / viewer.core.model_zoom * texScale) :
+        double seamThickness = (viewUV ? (triSoup[viewChannel]->virtualRadius * 0.0007 / viewer.core().camera_zoom * texScale) :
                                 (triSoup[viewChannel]->virtualRadius * 0.006));
         for(int eI = 0; eI < triSoup[viewChannel]->cohE.rows(); eI++) {
             const Eigen::RowVector4i& cohE = triSoup[viewChannel]->cohE.row(eI);
@@ -229,7 +229,7 @@ void updateViewerData(void)
         }
         UV_vis.conservativeResize(UV_vis.rows(), 3);
         UV_vis.rightCols(1) = Eigen::VectorXd::Zero(UV_vis.rows());
-        viewer.core.align_camera_center(UV_vis, F_vis);
+        viewer.core().align_camera_center(UV_vis, F_vis);
         updateViewerData_seam(UV_vis, F_vis, UV_vis);
         
         if((UV_vis.rows() != viewer.data().V.rows()) ||
@@ -240,7 +240,7 @@ void updateViewerData(void)
         viewer.data().set_mesh(UV_vis, F_vis);
         
         viewer.data().show_texture = false;
-        viewer.core.lighting_factor = 0.0;
+        viewer.core().lighting_factor = 0.0;
 
         updateViewerData_meshEdges();
         
@@ -253,7 +253,7 @@ void updateViewerData(void)
     }
     else {
         Eigen::MatrixXd V_vis = triSoup[viewChannel]->V_rest;
-        viewer.core.align_camera_center(V_vis, F_vis);
+        viewer.core().align_camera_center(V_vis, F_vis);
         updateViewerData_seam(V_vis, F_vis, UV_vis);
         
         if((V_vis.rows() != viewer.data().V.rows()) ||
@@ -273,10 +273,10 @@ void updateViewerData(void)
         }
         
         if(isLighting) {
-            viewer.core.lighting_factor = 1.0;
+            viewer.core().lighting_factor = 1.0;
         }
         else {
-            viewer.core.lighting_factor = 0.0;
+            viewer.core().lighting_factor = 0.0;
         }
         
         updateViewerData_meshEdges();
@@ -304,8 +304,8 @@ void saveScreenshot(const std::string& filePath, double scale = 1.0, bool writeG
     }
     viewer.data().point_size = fracTailSize * scale;
     
-    int width = static_cast<int>(scale * (viewer.core.viewport[2] - viewer.core.viewport[0]));
-    int height = static_cast<int>(scale * (viewer.core.viewport[3] - viewer.core.viewport[1]));
+    int width = static_cast<int>(scale * (viewer.core().viewport[2] - viewer.core().viewport[0]));
+    int height = static_cast<int>(scale * (viewer.core().viewport[3] - viewer.core().viewport[1]));
     
     // Allocate temporary buffers for image
     Eigen::Matrix<unsigned char, Eigen::Dynamic, Eigen::Dynamic> R(width, height);
@@ -314,7 +314,7 @@ void saveScreenshot(const std::string& filePath, double scale = 1.0, bool writeG
     Eigen::Matrix<unsigned char, Eigen::Dynamic, Eigen::Dynamic> A(width, height);
     
     // Draw the scene in the buffers
-    viewer.core.draw_buffer(viewer.data(), false, R, G, B, A);
+    viewer.core().draw_buffer(viewer.data(), false, R, G, B, A);
     
     if(writePNG) {
         // Save it to a PNG
@@ -403,20 +403,20 @@ void toggleOptimization(void)
         else {
             if((!headlessMode) && (iterNum == 0)) {
                 GifBegin(&GIFWriter, (outputFolderPath + "anim.gif").c_str(),
-                         GIFScale * (viewer.core.viewport[2] - viewer.core.viewport[0]),
-                         GIFScale * (viewer.core.viewport[3] - viewer.core.viewport[1]), GIFDelay);
+                         GIFScale * (viewer.core().viewport[2] - viewer.core().viewport[0]),
+                         GIFScale * (viewer.core().viewport[3] - viewer.core().viewport[1]), GIFDelay);
                 
                 saveScreenshot(outputFolderPath + "0.png", 0.5, true);
             }
             std::cout << "start/resume optimization, press again to pause." << std::endl;
-            viewer.core.is_animating = true;
+            viewer.core().is_animating = true;
             
             time(&lastStart_world);
         }
     }
     else {
         std::cout << "pause optimization, press again to resume." << std::endl;
-        viewer.core.is_animating = false;
+        viewer.core().is_animating = false;
         std::cout << "World Time:\nTime past: " << secPast << "s." << std::endl;
         secPast += difftime(time(NULL), lastStart_world);
     }
@@ -509,7 +509,7 @@ bool postDrawFunc(igl::opengl::glfw::Viewer& viewer)
     
     if(outerLoopFinished) {
         if(!isCapture3D) {
-            viewer.core.is_animating = true;
+            viewer.core().is_animating = true;
             isCapture3D = true;
         }
         else {
@@ -530,7 +530,7 @@ bool postDrawFunc(igl::opengl::glfw::Viewer& viewer)
                     exit(0);
                 }
                 else {
-                    viewer.core.is_animating = false;
+                    viewer.core().is_animating = false;
                     isCapture3D = false;
                     outerLoopFinished = false;
                 }
@@ -917,7 +917,7 @@ void converge_preDrawFunc(igl::opengl::glfw::Viewer& viewer)
     optimizer->flushGradFileOutput();
     
     optimization_on = false;
-    viewer.core.is_animating = false;
+    viewer.core().is_animating = false;
     std::cout << "optimization converged, with " << secPast << "s." << std::endl;
     logFile << "optimization converged, with " << secPast << "s." << std::endl;
     outerLoopFinished = true;
@@ -961,7 +961,7 @@ bool preDrawFunc(igl::opengl::glfw::Viewer& viewer)
                         updateViewerData();
                         
                         optimization_on = false;
-                        viewer.core.is_animating = false;
+                        viewer.core().is_animating = false;
                         std::cout << "optimization converged, with " << secPast << "s." << std::endl;
                         logFile << "optimization converged, with " << secPast << "s." << std::endl;
                         outerLoopFinished = true;
@@ -1085,7 +1085,7 @@ bool preDrawFunc(igl::opengl::glfw::Viewer& viewer)
             else if((capture3DI / 2) == 5) {
                 rotAxis = -Eigen::Vector3f::UnitX();
             }
-            viewer.core.trackball_angle = Eigen::Quaternionf(Eigen::AngleAxisf(rotDeg, rotAxis));
+            viewer.core().trackball_angle = Eigen::Quaternionf(Eigen::AngleAxisf(rotDeg, rotAxis));
             viewChannel = channel_result;
             viewUV = false;
             showSeam = true;
@@ -1636,14 +1636,14 @@ int main(int argc, char *argv[])
     }
     else {
         // Setup viewer and launch
-        viewer.core.background_color << 1.0f, 1.0f, 1.0f, 0.0f;
+        viewer.core().background_color << 1.0f, 1.0f, 1.0f, 0.0f;
         viewer.callback_key_down = &key_down;
         viewer.callback_pre_draw = &preDrawFunc;
         viewer.callback_post_draw = &postDrawFunc;
         viewer.data().show_lines = true;
-        viewer.core.orthographic = true;
-        viewer.core.camera_zoom *= 1.9;
-        viewer.core.animation_max_fps = 60.0;
+        viewer.core().orthographic = true;
+        viewer.core().camera_zoom *= 1.9;
+        viewer.core().animation_max_fps = 60.0;
         viewer.data().point_size = fracTailSize;
         viewer.data().show_overlay = true;
         updateViewerData();

@@ -122,17 +122,17 @@ namespace OptCuts{
                         energyTerms.emplace_back(new OptCuts::SymDirichletEnergy());
                         energyParams.emplace_back(1.0);
                         triSoup.resize(2);
-                        viewer.core.background_color << 1.0f, 1.0f, 1.0f, 0.0f;
+                        viewer.core().background_color << 1.0f, 1.0f, 1.0f, 0.0f;
                         viewer.callback_key_down = &key_down;
                         viewer.callback_pre_draw = &preDrawFunc;
                         viewer.callback_post_draw = &postDrawFunc;
                         viewer.data().show_lines = true;
-                        viewer.core.orthographic = true;
-                        viewer.core.camera_zoom *= 1.9;
-                        viewer.core.animation_max_fps = 60.0;
+                        viewer.core().orthographic = true;
+                        viewer.core().camera_zoom *= 1.9;
+                        viewer.core().animation_max_fps = 60.0;
                         viewer.data().point_size = 16.0f;
                         viewer.data().show_overlay = true;
-                        viewer.core.is_animating = true;
+                        viewer.core().is_animating = true;
                         viewer.launch_init(true, false);
                         
                         char buf[BUFSIZ];
@@ -198,7 +198,7 @@ namespace OptCuts{
                                 else if((capture3DI / 2) == 5) {
                                     rotAxis = -Eigen::Vector3f::UnitX();
                                 }
-                                viewer.core.trackball_angle = Eigen::Quaternionf(Eigen::AngleAxisf(rotDeg, rotAxis));
+                                viewer.core().trackball_angle = Eigen::Quaternionf(Eigen::AngleAxisf(rotDeg, rotAxis));
                                 viewUV = false;
                                 showTexture = showDistortion = (capture3DI % 2);
                                 updateViewerData();
