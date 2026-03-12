@@ -107,6 +107,12 @@ double secPast = 0.0;
 time_t lastStart_world;
 Timer timer, timer_step;
 
+#ifdef OPTCUTS_PYTHON
+Eigen::MatrixXd result_V_after_run;
+Eigen::MatrixXi result_F_after_run;
+int iterNum_after_run = 0;
+#endif
+
 
 void saveInfo(bool writePNG = true, bool writeGIF = true, bool writeMesh = true);
 
@@ -1098,7 +1104,8 @@ bool preDrawFunc(igl::opengl::glfw::Viewer& viewer)
     return false;
 }
 
-int main(int argc, char *argv[])
+// Entry point used by both standalone binary and Python module (when OPTCUTS_PYTHON is defined).
+int run_optcuts_main(int argc, char *argv[])
 {
     int progMode = 0;
     if(argc > 1) {
@@ -1629,7 +1636,7 @@ int main(int argc, char *argv[])
     //////////////////////////////////////////////////////////////////////////////
     
     if(headlessMode) {
-        while(true) {
+        while(!outerLoopFinished) {
             preDrawFunc(viewer);
             postDrawFunc(viewer);
         }
@@ -1650,7 +1657,12 @@ int main(int argc, char *argv[])
         viewer.launch();
     }
     
-    // Before exit
+    // Before exit: save result for Python get_result_mesh() when built as module
+#ifdef OPTCUTS_PYTHON
+    result_V_after_run = optimizer->getResult().V;
+    result_F_after_run = optimizer->getResult().F;
+    iterNum_after_run = iterNum;
+#endif
     logFile.close();
     for(auto& eI : energyTerms) {
         delete eI;
@@ -1658,3 +1670,9 @@ int main(int argc, char *argv[])
     delete optimizer;
     delete triSoup[0];
 }
+
+#ifndef OPTCUTS_PYTHON
+int main(int argc, char *argv[]) {
+    return run_optcuts_main(argc, argv);
+}
+#endif
