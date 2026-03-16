@@ -111,6 +111,11 @@ Timer timer, timer_step;
 Eigen::MatrixXd result_V_after_run;
 Eigen::MatrixXi result_F_after_run;
 int iterNum_after_run = 0;
+Eigen::VectorXd result_sigma1_after_run;
+Eigen::VectorXd result_sigma2_after_run;
+Eigen::VectorXd result_phi_after_run;
+Eigen::MatrixXi result_cohE_after_run;
+Eigen::MatrixXd result_V_rest_after_run;
 #endif
 
 
@@ -1662,6 +1667,10 @@ int run_optcuts_main(int argc, char *argv[])
     result_V_after_run = optimizer->getResult().V;
     result_F_after_run = optimizer->getResult().F;
     iterNum_after_run = iterNum;
+    OptCuts::SigmaBoundEnergy::getSigmaFields(optimizer->getResult(),
+        result_sigma1_after_run, result_sigma2_after_run, result_phi_after_run);
+    result_cohE_after_run = optimizer->getResult().cohE;
+    result_V_rest_after_run = optimizer->getResult().V_rest;
 #endif
     logFile.close();
     for(auto& eI : energyTerms) {

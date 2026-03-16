@@ -36,6 +36,10 @@ namespace OptCuts {
         /// Compute actual max singular values over all triangles (for logging).
         static void getMaxSingularValues(const TriMesh& data, double& max_sigma1, double& max_sigma2);
 
+        /// Compute sigma1, sigma2, phi (angle of principal stretch direction w.r.t. UV x-axis) per triangle.
+        static void getSigmaFields(const TriMesh& data,
+            Eigen::VectorXd& sigma1, Eigen::VectorXd& sigma2, Eigen::VectorXd& phi);
+
         /// Compute 2x2 Jacobian J (rest 2D -> UV) and singular values σ1 ≥ σ2 for one triangle.
         /// Returns false if triangle is degenerate. (Public for use by SigmaSmoothEnergy.)
         static bool computeJacobianAndSingularValues(const TriMesh& data, int triI,

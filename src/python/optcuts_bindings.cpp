@@ -52,6 +52,11 @@ extern igl::opengl::glfw::Viewer viewer;
 extern Eigen::MatrixXd result_V_after_run;
 extern Eigen::MatrixXi result_F_after_run;
 extern int iterNum_after_run;
+extern Eigen::VectorXd result_sigma1_after_run;
+extern Eigen::VectorXd result_sigma2_after_run;
+extern Eigen::VectorXd result_phi_after_run;
+extern Eigen::MatrixXi result_cohE_after_run;
+extern Eigen::MatrixXd result_V_rest_after_run;
 #endif
 
 PYBIND11_MODULE(optcuts, m) {
@@ -162,6 +167,33 @@ PYBIND11_MODULE(optcuts, m) {
     m.def("get_output_folder", []() { return outputFolderPath; });
 
     // ----- Result: from global optimizer while running, or from saved copy after run_main returns -----
+    m.def("get_sigma_fields", []() {
+#ifdef OPTCUTS_PYTHON
+        if (result_sigma1_after_run.size() > 0)
+            return py::make_tuple(result_sigma1_after_run, result_sigma2_after_run, result_phi_after_run);
+#endif
+        if (optimizer == nullptr || triSoup.empty())
+            throw std::runtime_error("get_sigma_fields: no result (run run_main first)");
+        const OptCuts::TriMesh& r = optimizer->getResult();
+        Eigen::VectorXd sigma1, sigma2, phi;
+        OptCuts::SigmaBoundEnergy::getSigmaFields(r, sigma1, sigma2, phi);
+        return py::make_tuple(sigma1, sigma2, phi);
+    }, "Return (sigma1, sigma2, phi) per triangle after run_main(). "
+       "sigma1 >= sigma2 are principal stretch values; phi is the angle [rad] of the sigma1 direction w.r.t. UV x-axis.");
+
+    m.def("get_cut_edges", []() {
+#ifdef OPTCUTS_PYTHON
+        if (result_cohE_after_run.rows() > 0)
+            return py::make_tuple(result_cohE_after_run, result_V_rest_after_run);
+#endif
+        if (optimizer == nullptr || triSoup.empty())
+            throw std::runtime_error("get_cut_edges: no result (run run_main first)");
+        const OptCuts::TriMesh& r = optimizer->getResult();
+        return py::make_tuple(r.cohE, r.V_rest);
+    }, "Return (cohE, V_rest) after run_main(). "
+       "cohE: (N,4) matrix of cut edge pairs; each row [v0,v1,v2,v3] is one cut edge where "
+       "(v0,v1) and (v2,v3) are the two split-side vertex indices into V_rest (3D coords).");
+
     m.def("get_result_mesh", []() {
 #ifdef OPTCUTS_PYTHON
         if (result_V_after_run.size() > 0)
