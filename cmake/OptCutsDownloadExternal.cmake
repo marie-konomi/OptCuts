@@ -46,3 +46,16 @@ endfunction()
 #       GIT_TAG        b901a26fff09af4a16581429a1c5748d21520b7f
 #    )
 #endfunction()
+
+# pybind11 (for Python bindings)
+function(download_pybind11)
+  include(FetchContent)
+  FetchContent_Declare(
+    pybind11
+    GIT_REPOSITORY https://github.com/pybind/pybind11.git
+    GIT_TAG        v2.11.1
+  )
+  set(PYBIND11_INSTALL OFF CACHE BOOL "" FORCE)
+  set(PYBIND11_TEST OFF CACHE BOOL "" FORCE)
+  FetchContent_MakeAvailable(pybind11)
+endfunction()

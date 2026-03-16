@@ -229,6 +229,42 @@ namespace OptCuts {
         double total = ev.sum();
     }
 
+    void SigmaBoundEnergy::getSigmaFields(const TriMesh& data,
+        Eigen::VectorXd& sigma1_out, Eigen::VectorXd& sigma2_out, Eigen::VectorXd& phi_out)
+    {
+        const int nTri = data.F.rows();
+        sigma1_out.resize(nTri);
+        sigma2_out.resize(nTri);
+        phi_out.resize(nTri);
+        for (int triI = 0; triI < nTri; triI++) {
+            const double A = data.triArea[triI];
+            const double e0_len = std::sqrt(data.e0SqLen[triI]);
+            if (A <= 0.0 || e0_len <= 0.0) {
+                sigma1_out[triI] = sigma2_out[triI] = phi_out[triI] = 0.0;
+                continue;
+            }
+            const Eigen::Vector3i& triVInd = data.F.row(triI);
+            const double twoA = 2.0 * A;
+            const Eigen::RowVector2d& U1 = data.V.row(triVInd[0]);
+            const Eigen::RowVector2d& U2 = data.V.row(triVInd[1]);
+            const Eigen::RowVector2d& U3 = data.V.row(triVInd[2]);
+            Eigen::Vector2d u0 = (U2 - U1).transpose();
+            Eigen::Vector2d u1 = (U3 - U1).transpose();
+            const double alpha = -data.e0dote1[triI] / (twoA * e0_len);
+            const double beta = e0_len / twoA;
+            Eigen::Matrix2d J;
+            J.col(0) = u0 / e0_len;
+            J.col(1) = alpha * u0 + beta * u1;
+            Eigen::JacobiSVD<Eigen::Matrix2d> svd(J, Eigen::ComputeFullU | Eigen::ComputeFullV);
+            const Eigen::Vector2d& sv = svd.singularValues(); // sv(0) >= sv(1)
+            sigma1_out[triI] = sv(0);
+            sigma2_out[triI] = sv(1);
+            // phi: angle of max-stretch direction (first left singular vector) w.r.t. UV x-axis
+            const Eigen::Matrix2d& U_mat = svd.matrixU();
+            phi_out[triI] = std::atan2(U_mat(1, 0), U_mat(0, 0));
+        }
+    }
+
     void SigmaBoundEnergy::getMaxSingularValues(const TriMesh& data, double& max_sigma1, double& max_sigma2)
     {
         max_sigma1 = 0.0;

@@ -4,6 +4,28 @@ project(OptCuts)
 set(OPTCUTS_EXTERNAL "${CMAKE_CURRENT_SOURCE_DIR}/ext")
 set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
 
+# Option to build Python bindings (pybind11)
+option(OPTCUTS_BUILD_PYTHON "Build Python bindings with pybind11" OFF)
+
+if(OPTCUTS_BUILD_PYTHON)
+  # Prefer Python 3.9 (pyenv) when available - set before find_package
+  if(NOT Python3_EXECUTABLE)
+    set(_pyenv_root "$ENV{HOME}/.pyenv")
+    if(DEFINED ENV{PYENV_ROOT})
+      set(_pyenv_root "$ENV{PYENV_ROOT}")
+    endif()
+    # Try pyenv 3.9.x (e.g. 3.9.9)
+    file(GLOB _py39_versions "${_pyenv_root}/versions/3.9.*/bin/python3")
+    if(_py39_versions)
+      list(GET _py39_versions 0 _py39_path)
+      set(Python3_EXECUTABLE "${_py39_path}" CACHE STRING "Python 3.9 for optcuts")
+      message(STATUS "Using Python 3.9: ${Python3_EXECUTABLE}")
+    endif()
+  endif()
+  find_package(Python3 REQUIRED COMPONENTS Interpreter Development)
+  set(PYBIND11_PYTHON_VERSION ${Python3_VERSION})
+endif()
+
 include(${PROJECT_NAME}Dependencies)
 
 # libigl
@@ -66,4 +88,39 @@ target_link_libraries(${PROJECT_NAME}_bin igl::core igl::opengl_glfw igl::triang
 
 if(TARGET TBB::tbb)
   target_link_libraries(${PROJECT_NAME}_bin TBB::tbb)
+endif()
+
+# Python bindings (optional): link main.cpp so all main.cpp functions/globals are available; use OPTCUTS_PYTHON to exclude int main().
+if(OPTCUTS_BUILD_PYTHON)
+  pybind11_add_module(optcuts
+    src/python/optcuts_bindings.cpp
+    src/main.cpp
+    src/Optimizer.cpp
+    src/TriMesh.cpp
+    src/Scaffold.cpp
+    src/Energy/Energy.cpp
+    src/Energy/SymDirichletEnergy.cpp
+    src/Energy/SigmaBoundEnergy.cpp
+    src/Energy/SigmaSmoothEnergy.cpp
+    src/Utils/IglUtils.cpp
+    src/LinSysSolver/EigenLibSolver.cpp
+  )
+  target_compile_definitions(optcuts PRIVATE OPTCUTS_PYTHON)
+  target_include_directories(optcuts PRIVATE
+    src
+    src/Energy
+    src/Utils
+    src/LinSysSolver
+    src/UnitTest
+  )
+  set_target_properties(optcuts PROPERTIES CXX_STANDARD 14)
+  target_link_libraries(optcuts PRIVATE
+    igl::core
+    igl::opengl_glfw
+    igl::triangle
+    igl::png
+  )
+  if(TARGET TBB::tbb)
+    target_link_libraries(optcuts PRIVATE TBB::tbb)
+  endif()
 endif()
