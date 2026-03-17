@@ -33,6 +33,97 @@
 #include <fstream>
 #include <string>
 #include <ctime>
+#include <sstream>
+#include <vector>
+
+// Number of nodes per element type in Gmsh MSH v2.2
+static int mshNodesPerElem(int type) {
+    switch(type) { case 1: return 2; case 2: return 3; case 3: return 4;
+                   case 4: return 4; case 5: return 8; case 15: return 1; default: return -1; }
+}
+// Gmsh MSH v2.2 reader (ASCII and binary): extracts surface triangles (element type 2)
+static bool readMSH(const std::string& path, Eigen::MatrixXd& V_out, Eigen::MatrixXi& F_out) {
+    std::ifstream in(path, std::ios::binary);
+    if (!in) return false;
+    bool isBinary = false;
+    std::string line;
+    std::vector<std::array<double,3>> nodes;
+    std::vector<std::array<int,3>> tris;
+
+    auto readline = [&]() { std::getline(in, line); if (!line.empty() && line.back()=='\r') line.pop_back(); };
+
+    while (std::getline(in, line)) {
+        if (!line.empty() && line.back()=='\r') line.pop_back();
+
+        if (line == "$MeshFormat") {
+            readline();
+            std::istringstream ss(line); double ver; int ftype, dsize;
+            ss >> ver >> ftype >> dsize;
+            isBinary = (ftype == 1);
+            if (isBinary) { int one; in.read(reinterpret_cast<char*>(&one), 4); readline(); } // skip newline
+            readline(); // $EndMeshFormat
+
+        } else if (line == "$Nodes") {
+            readline();
+            int n = std::stoi(line);
+            nodes.resize(n);
+            if (isBinary) {
+                for (int i = 0; i < n; ++i) {
+                    int id; in.read(reinterpret_cast<char*>(&id), 4);
+                    in.read(reinterpret_cast<char*>(nodes[i].data()), 24);
+                }
+                readline(); // newline before $EndNodes
+            } else {
+                for (int i = 0; i < n; ++i) {
+                    readline();
+                    std::istringstream ss2(line); int id;
+                    ss2 >> id >> nodes[i][0] >> nodes[i][1] >> nodes[i][2];
+                }
+            }
+
+        } else if (line == "$Elements") {
+            readline();
+            int ne = std::stoi(line);
+            if (isBinary) {
+                int read = 0;
+                while (read < ne) {
+                    int etype, count, ntags;
+                    in.read(reinterpret_cast<char*>(&etype),  4);
+                    in.read(reinterpret_cast<char*>(&count),  4);
+                    in.read(reinterpret_cast<char*>(&ntags),  4);
+                    int nn = mshNodesPerElem(etype);
+                    for (int i = 0; i < count; ++i) {
+                        int id; in.read(reinterpret_cast<char*>(&id), 4);
+                        for (int t = 0; t < ntags; ++t) { int tag; in.read(reinterpret_cast<char*>(&tag), 4); }
+                        std::vector<int> nids(nn < 0 ? 0 : nn);
+                        for (int j = 0; j < (int)nids.size(); ++j) in.read(reinterpret_cast<char*>(&nids[j]), 4);
+                        if (etype == 2) tris.push_back({nids[0]-1, nids[1]-1, nids[2]-1});
+                    }
+                    read += count;
+                }
+            } else {
+                for (int i = 0; i < ne; ++i) {
+                    readline();
+                    std::istringstream ss2(line); int id, etype, ntags;
+                    ss2 >> id >> etype >> ntags;
+                    for (int t = 0; t < ntags; ++t) { int tag; ss2 >> tag; }
+                    if (etype == 2) {
+                        int a, b, c; ss2 >> a >> b >> c;
+                        tris.push_back({a-1, b-1, c-1});
+                    }
+                }
+            }
+        }
+    }
+    if (nodes.empty() || tris.empty()) return false;
+    V_out.resize(nodes.size(), 3);
+    for (int i = 0; i < (int)nodes.size(); ++i)
+        V_out.row(i) << nodes[i][0], nodes[i][1], nodes[i][2];
+    F_out.resize(tris.size(), 3);
+    for (int i = 0; i < (int)tris.size(); ++i)
+        F_out.row(i) << tris[i][0], tris[i][1], tris[i][2];
+    return true;
+}
 
 
 Eigen::MatrixXd V, UV, N;
@@ -79,7 +170,13 @@ std::string outputFolderPath = "output/";
 
 // visualization
 bool headlessMode = false;
+#ifndef OPTCUTS_PYTHON
 igl::opengl::glfw::Viewer viewer;
+#else
+// In Python mode, viewer is never used (headless); use raw storage to avoid GLFW init at import.
+static char viewer_storage[sizeof(igl::opengl::glfw::Viewer)];
+igl::opengl::glfw::Viewer& viewer = *reinterpret_cast<igl::opengl::glfw::Viewer*>(viewer_storage);
+#endif
 const int channel_initial = 0;
 const int channel_result = 1;
 const int channel_findExtrema = 2;
@@ -1112,6 +1209,10 @@ bool preDrawFunc(igl::opengl::glfw::Viewer& viewer)
 // Entry point used by both standalone binary and Python module (when OPTCUTS_PYTHON is defined).
 int run_optcuts_main(int argc, char *argv[])
 {
+#ifdef OPTCUTS_PYTHON
+    // Construct the viewer here (not at global init time) to avoid GLFW crash on import.
+    new (&viewer_storage) igl::opengl::glfw::Viewer();
+#endif
     int progMode = 0;
     if(argc > 1) {
         progMode = std::stoi(argv[1]);
@@ -1176,6 +1277,9 @@ int run_optcuts_main(int argc, char *argv[])
     }
     else if(suffix == ".obj") {
         loadSucceed = igl::readOBJ(meshFilePath, V, UV, N, F, FUV, FN);
+    }
+    else if(suffix == ".msh") {
+        loadSucceed = readMSH(meshFilePath, V, F);
     }
     else {
         std::cout << "unkown mesh file format!" << std::endl;
