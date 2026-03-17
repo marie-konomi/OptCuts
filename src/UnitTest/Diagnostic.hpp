@@ -20,7 +20,11 @@
 #include <sstream>
 
 extern std::string outputFolderPath;
+#ifndef OPTCUTS_PYTHON
 extern igl::opengl::glfw::Viewer viewer;
+#else
+extern igl::opengl::glfw::Viewer& viewer;
+#endif
 extern bool viewUV;
 extern bool showTexture;
 extern int showDistortion;

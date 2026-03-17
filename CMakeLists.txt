@@ -5,7 +5,7 @@ set(OPTCUTS_EXTERNAL "${CMAKE_CURRENT_SOURCE_DIR}/ext")
 set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
 
 # Option to build Python bindings (pybind11)
-option(OPTCUTS_BUILD_PYTHON "Build Python bindings with pybind11" OFF)
+option(OPTCUTS_BUILD_PYTHON "Build Python bindings with pybind11" ON)
 
 if(OPTCUTS_BUILD_PYTHON)
   # Prefer Python 3.9 (pyenv) when available - set before find_package
@@ -114,6 +114,9 @@ if(OPTCUTS_BUILD_PYTHON)
     src/UnitTest
   )
   set_target_properties(optcuts PROPERTIES CXX_STANDARD 14)
+  if(DEFINED OPTCUTS_PYTHON_OUTPUT_DIR)
+    set_target_properties(optcuts PROPERTIES LIBRARY_OUTPUT_DIRECTORY ${OPTCUTS_PYTHON_OUTPUT_DIR})
+  endif()
   target_link_libraries(optcuts PRIVATE
     igl::core
     igl::opengl_glfw
