@@ -12,6 +12,7 @@
 #include <igl/massmatrix.h>
 
 #include <tbb/tbb.h>
+#include <Eigen/SVD>
 
 #include <limits>
 #include <fstream>
@@ -24,24 +25,45 @@ namespace OptCuts {
     void SymDirichletEnergy::getEnergyValPerElem(const TriMesh& data, Eigen::VectorXd& energyValPerElem, bool uniformWeight) const
     {
         const double normalizer_div = data.surfaceArea;
-        
+        const bool useIdeal = (sigma1_ideal_ != 1.0 || sigma2_ideal_ != 1.0);
+
         energyValPerElem.resize(data.F.rows());
         for(int triI = 0; triI < data.F.rows(); triI++) {
             const Eigen::Vector3i& triVInd = data.F.row(triI);
-            
+
             const Eigen::RowVector2d& U1 = data.V.row(triVInd[0]);
             const Eigen::RowVector2d& U2 = data.V.row(triVInd[1]);
             const Eigen::RowVector2d& U3 = data.V.row(triVInd[2]);
-            
+
             const Eigen::RowVector2d U2m1 = U2 - U1;
             const Eigen::RowVector2d U3m1 = U3 - U1;
-            
+
             const double area_U = 0.5 * (U2m1[0] * U3m1[1] - U2m1[1] * U3m1[0]);
-            
             const double w = (uniformWeight ? 1.0 : (data.triArea[triI] / normalizer_div));
-            energyValPerElem[triI] = w * (1.0 + data.triAreaSq[triI] / area_U / area_U) *
-                ((U3m1.squaredNorm() * data.e0SqLen[triI] + U2m1.squaredNorm() * data.e1SqLen[triI]) / 4 / data.triAreaSq[triI] -
-                U3m1.dot(U2m1) * data.e0dote1[triI] / 2 / data.triAreaSq[triI]);
+
+            if(useIdeal) {
+                const double A = data.triArea[triI];
+                if(A <= 0.0) { energyValPerElem[triI] = 0.0; continue; }
+                const double e0_len = std::sqrt(data.e0SqLen[triI]);
+                if(e0_len <= 0.0) { energyValPerElem[triI] = 0.0; continue; }
+                const double twoA = 2.0 * A;
+                const double alpha = -data.e0dote1[triI] / (twoA * e0_len);
+                const double beta  = e0_len / twoA;
+                Eigen::Matrix2d J;
+                J.col(0) = U2m1.transpose() / e0_len;
+                J.col(1) = alpha * U2m1.transpose() + beta * U3m1.transpose();
+                Eigen::JacobiSVD<Eigen::Matrix2d> svd(J, Eigen::ComputeFullU | Eigen::ComputeFullV);
+                double s1 = svd.singularValues()(0);
+                double s2 = svd.singularValues()(1);
+                if(s1 < s2) std::swap(s1, s2);
+                energyValPerElem[triI] = w * (
+                    (s1/sigma1_ideal_)*(s1/sigma1_ideal_) + (s2/sigma2_ideal_)*(s2/sigma2_ideal_) +
+                    (sigma1_ideal_/s1)*(sigma1_ideal_/s1) + (sigma2_ideal_/s2)*(sigma2_ideal_/s2));
+            } else {
+                energyValPerElem[triI] = w * (1.0 + data.triAreaSq[triI] / area_U / area_U) *
+                    ((U3m1.squaredNorm() * data.e0SqLen[triI] + U2m1.squaredNorm() * data.e1SqLen[triI]) / 4 / data.triAreaSq[triI] -
+                    U3m1.dot(U2m1) * data.e0dote1[triI] / 2 / data.triAreaSq[triI]);
+            }
         }
     }
     
@@ -258,45 +280,77 @@ namespace OptCuts {
     void SymDirichletEnergy::computeGradient(const TriMesh& data, Eigen::VectorXd& gradient, bool uniformWeight) const
     {
         const double normalizer_div = data.surfaceArea;
-        
+        const bool useIdeal = (sigma1_ideal_ != 1.0 || sigma2_ideal_ != 1.0);
+
         gradient.resize(data.V.rows() * 2);
         gradient.setZero();
         for(int triI = 0; triI < data.F.rows(); triI++) {
             const Eigen::Vector3i& triVInd = data.F.row(triI);
-            
+
             const Eigen::Vector2d& U1 = data.V.row(triVInd[0]);
             const Eigen::Vector2d& U2 = data.V.row(triVInd[1]);
             const Eigen::Vector2d& U3 = data.V.row(triVInd[2]);
-            
+
             const Eigen::Vector2d U2m1 = U2 - U1;
             const Eigen::Vector2d U3m1 = U3 - U1;
-            
-            const double area_U = 0.5 * (U2m1[0] * U3m1[1] - U2m1[1] * U3m1[0]);
-            
-            const double leftTerm = 1.0 + data.triAreaSq[triI] / area_U / area_U;
-            const double rightTerm = (U3m1.squaredNorm() * data.e0SqLen[triI] + U2m1.squaredNorm() * data.e1SqLen[triI]) /
-                4 / data.triAreaSq[triI] - U3m1.dot(U2m1) * data.e0dote1[triI] / 2 / data.triAreaSq[triI];
-            
-            const double areaRatio = data.triAreaSq[triI] / area_U / area_U / area_U;
+
             const double w = (uniformWeight ? 1.0 : (data.triArea[triI] / normalizer_div));
-            
-            const Eigen::Vector2d edge_oppo1 = U3 - U2;
-            const Eigen::Vector2d dLeft1 = areaRatio * Eigen::Vector2d(edge_oppo1[1], -edge_oppo1[0]);
-            const Eigen::Vector2d dRight1 = ((data.e0dote1[triI] - data.e0SqLen[triI]) * U3m1 +
-                (data.e0dote1[triI] - data.e1SqLen[triI]) * U2m1) / 2.0 / data.triAreaSq[triI];
-            gradient.block(triVInd[0] * 2, 0, 2, 1) += w * (dLeft1 * rightTerm + dRight1 * leftTerm);
-            
-            const Eigen::Vector2d edge_oppo2 = U1 - U3;
-            const Eigen::Vector2d dLeft2 = areaRatio * Eigen::Vector2d(edge_oppo2[1], -edge_oppo2[0]);
-            const Eigen::Vector2d dRight2 = (data.e1SqLen[triI] * U2m1 - data.e0dote1[triI] * U3m1) / 2.0 / data.triAreaSq[triI];
-            gradient.block(triVInd[1] * 2, 0, 2, 1) += w * (dLeft2 * rightTerm + dRight2 * leftTerm);
-            
-            const Eigen::Vector2d edge_oppo3 = U2 - U1;
-            const Eigen::Vector2d dLeft3 = areaRatio * Eigen::Vector2d(edge_oppo3[1], -edge_oppo3[0]);
-            const Eigen::Vector2d dRight3 = (data.e0SqLen[triI] * U3m1 - data.e0dote1[triI] * U2m1) / 2.0 / data.triAreaSq[triI];
-            gradient.block(triVInd[2] * 2, 0, 2, 1) += w * (dLeft3 * rightTerm + dRight3 * leftTerm);
+
+            if(useIdeal) {
+                const double A = data.triArea[triI];
+                if(A <= 0.0) continue;
+                const double e0_len = std::sqrt(data.e0SqLen[triI]);
+                if(e0_len <= 0.0) continue;
+                const double twoA = 2.0 * A;
+                const double alpha = -data.e0dote1[triI] / (twoA * e0_len);
+                const double beta  = e0_len / twoA;
+                Eigen::Matrix2d J;
+                J.col(0) = U2m1 / e0_len;
+                J.col(1) = alpha * U2m1 + beta * U3m1;
+                Eigen::JacobiSVD<Eigen::Matrix2d> svd(J, Eigen::ComputeFullU | Eigen::ComputeFullV);
+                const Eigen::Matrix2d& Um = svd.matrixU();
+                const Eigen::Matrix2d& Vm = svd.matrixV();
+                double s1 = svd.singularValues()(0);
+                double s2 = svd.singularValues()(1);
+                // σ1 >= σ2 を保証（SVDは降順なのでそのまま）
+                const double si1 = sigma1_ideal_, si2 = sigma2_ideal_;
+                const double dE_ds1 = 2.0*s1/(si1*si1) - 2.0*(si1*si1)/(s1*s1*s1);
+                const double dE_ds2 = 2.0*s2/(si2*si2) - 2.0*(si2*si2)/(s2*s2*s2);
+                const Eigen::Matrix2d dE_dJ = dE_ds1 * Um.col(0) * Vm.col(0).transpose()
+                                            + dE_ds2 * Um.col(1) * Vm.col(1).transpose();
+                Eigen::Vector2d g_u0, g_u1;
+                g_u0(0) = dE_dJ(0,0)/e0_len + dE_dJ(0,1)*alpha;
+                g_u0(1) = dE_dJ(1,0)/e0_len + dE_dJ(1,1)*alpha;
+                g_u1(0) = dE_dJ(0,1)*beta;
+                g_u1(1) = dE_dJ(1,1)*beta;
+                gradient.block<2,1>(triVInd[0]*2, 0) -= w*(g_u0 + g_u1);
+                gradient.block<2,1>(triVInd[1]*2, 0) += w*g_u0;
+                gradient.block<2,1>(triVInd[2]*2, 0) += w*g_u1;
+            } else {
+                const double area_U = 0.5 * (U2m1[0] * U3m1[1] - U2m1[1] * U3m1[0]);
+                const double leftTerm = 1.0 + data.triAreaSq[triI] / area_U / area_U;
+                const double rightTerm = (U3m1.squaredNorm() * data.e0SqLen[triI] + U2m1.squaredNorm() * data.e1SqLen[triI]) /
+                    4 / data.triAreaSq[triI] - U3m1.dot(U2m1) * data.e0dote1[triI] / 2 / data.triAreaSq[triI];
+                const double areaRatio = data.triAreaSq[triI] / area_U / area_U / area_U;
+
+                const Eigen::Vector2d edge_oppo1 = U3 - U2;
+                const Eigen::Vector2d dLeft1 = areaRatio * Eigen::Vector2d(edge_oppo1[1], -edge_oppo1[0]);
+                const Eigen::Vector2d dRight1 = ((data.e0dote1[triI] - data.e0SqLen[triI]) * U3m1 +
+                    (data.e0dote1[triI] - data.e1SqLen[triI]) * U2m1) / 2.0 / data.triAreaSq[triI];
+                gradient.block(triVInd[0] * 2, 0, 2, 1) += w * (dLeft1 * rightTerm + dRight1 * leftTerm);
+
+                const Eigen::Vector2d edge_oppo2 = U1 - U3;
+                const Eigen::Vector2d dLeft2 = areaRatio * Eigen::Vector2d(edge_oppo2[1], -edge_oppo2[0]);
+                const Eigen::Vector2d dRight2 = (data.e1SqLen[triI] * U2m1 - data.e0dote1[triI] * U3m1) / 2.0 / data.triAreaSq[triI];
+                gradient.block(triVInd[1] * 2, 0, 2, 1) += w * (dLeft2 * rightTerm + dRight2 * leftTerm);
+
+                const Eigen::Vector2d edge_oppo3 = U2 - U1;
+                const Eigen::Vector2d dLeft3 = areaRatio * Eigen::Vector2d(edge_oppo3[1], -edge_oppo3[0]);
+                const Eigen::Vector2d dRight3 = (data.e0SqLen[triI] * U3m1 - data.e0dote1[triI] * U2m1) / 2.0 / data.triAreaSq[triI];
+                gradient.block(triVInd[2] * 2, 0, 2, 1) += w * (dLeft3 * rightTerm + dRight3 * leftTerm);
+            }
         }
-        
+
         for(const auto fixedVI : data.fixedVert) {
             gradient[2 * fixedVI] = 0.0;
             gradient[2 * fixedVI + 1] = 0.0;
@@ -644,9 +698,8 @@ namespace OptCuts {
         logFile << "energyVal computation error = " << err << std::endl;
     }
     
-    SymDirichletEnergy::SymDirichletEnergy(void) :
-        Energy(true)
+    SymDirichletEnergy::SymDirichletEnergy(double sigma1_ideal, double sigma2_ideal) :
+        Energy(true), sigma1_ideal_(sigma1_ideal), sigma2_ideal_(sigma2_ideal)
     {
-        
     }
 }
