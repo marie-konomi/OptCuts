@@ -17,9 +17,14 @@
 #include <igl/harmonic.h>
 
 #include <cstdio>
+#include <sstream>
 
 extern std::string outputFolderPath;
+#ifndef OPTCUTS_PYTHON
 extern igl::opengl::glfw::Viewer viewer;
+#else
+extern igl::opengl::glfw::Viewer& viewer;
+#endif
 extern bool viewUV;
 extern bool showTexture;
 extern int showDistortion;
@@ -121,17 +126,17 @@ namespace OptCuts{
                         energyTerms.emplace_back(new OptCuts::SymDirichletEnergy());
                         energyParams.emplace_back(1.0);
                         triSoup.resize(2);
-                        viewer.core.background_color << 1.0f, 1.0f, 1.0f, 0.0f;
+                        viewer.core().background_color << 1.0f, 1.0f, 1.0f, 0.0f;
                         viewer.callback_key_down = &key_down;
                         viewer.callback_pre_draw = &preDrawFunc;
                         viewer.callback_post_draw = &postDrawFunc;
                         viewer.data().show_lines = true;
-                        viewer.core.orthographic = true;
-                        viewer.core.camera_zoom *= 1.9;
-                        viewer.core.animation_max_fps = 60.0;
+                        viewer.core().orthographic = true;
+                        viewer.core().camera_zoom *= 1.9;
+                        viewer.core().animation_max_fps = 60.0;
                         viewer.data().point_size = 16.0f;
                         viewer.data().show_overlay = true;
-                        viewer.core.is_animating = true;
+                        viewer.core().is_animating = true;
                         viewer.launch_init(true, false);
                         
                         char buf[BUFSIZ];
@@ -197,7 +202,7 @@ namespace OptCuts{
                                 else if((capture3DI / 2) == 5) {
                                     rotAxis = -Eigen::Vector3f::UnitX();
                                 }
-                                viewer.core.trackball_angle = Eigen::Quaternionf(Eigen::AngleAxisf(rotDeg, rotAxis));
+                                viewer.core().trackball_angle = Eigen::Quaternionf(Eigen::AngleAxisf(rotDeg, rotAxis));
                                 viewUV = false;
                                 showTexture = showDistortion = (capture3DI % 2);
                                 updateViewerData();
@@ -446,6 +451,22 @@ namespace OptCuts{
                                 double l2Stretch, lInfStretch, l2Shear, lInfCompress;
                                 infoFile >> l2Stretch >> lInfStretch >> l2Shear >> lInfCompress;
                                 fprintf(outFile, "%lf, %lf, %lf, ", l2Stretch, lInfStretch, l2Shear);
+                                
+                                double sigma1_max = 0.0, sigma2_max = 0.0;
+                                infoFile >> bypass;
+                                if(bypass == "initialSeams") {
+                                    int initSeamsRows;
+                                    infoFile >> initSeamsRows;
+                                    std::string line;
+                                    while(std::getline(infoFile, line)) {
+                                        if(line.size() >= 12 && line.substr(0, 12) == "sigma_actual") {
+                                            std::istringstream iss(line.substr(12));
+                                            iss >> sigma1_max >> sigma2_max;
+                                            break;
+                                        }
+                                    }
+                                }
+                                fprintf(outFile, "%lf, %lf, ", sigma1_max, sigma2_max);
                                 
                                 fprintf(outFile, "\"%s\"", buf);
                                 

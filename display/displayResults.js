@@ -37,9 +37,19 @@ function displayResults(expInfoByMethod, methodPath, methodTitle, showGIF = fals
 			    }
 			    document.write("<a target='_blank' href = '" + methodPath[methodI] + '/' + expInfoByMethod[methodI][exampleI].resultFolderName + "/finalResult.png'><img src='" + methodPath[methodI] + '/' + expInfoByMethod[methodI][exampleI].resultFolderName + "/finalResult.png' width = '300'/></a>");
 			    document.write("<a target='_blank' href = '" + methodPath[methodI] + '/' + expInfoByMethod[methodI][exampleI].resultFolderName + "/3DView0_distortion.png'><img src='" + methodPath[methodI] + '/' + expInfoByMethod[methodI][exampleI].resultFolderName + "/3DView0_distortion.png' width = '300'/></a>");
+			    var sigmaText = "";
+			    var s1 = parseFloat(expInfoByMethod[methodI][exampleI].sigma1_max);
+			    var s2 = parseFloat(expInfoByMethod[methodI][exampleI].sigma2_max);
+			    if (!isNaN(s1) && !isNaN(s2) && (s1 > 0 || s2 > 0)) {
+			      var parts = [];
+			      if (s1 > 0) parts.push("σ<sub>1</sub>≤" + s1);
+			      if (s2 > 0) parts.push("σ<sub>2</sub>≤" + s2);
+			      sigmaText = "&emsp; " + parts.join(" ");
+			    }
 			    document.write("<br />" +
 			    	"E<sub>d</sub> = " + parseFloat(expInfoByMethod[methodI][exampleI].E_SD).toFixed(3) + 
 			    	"&emsp; E<sub>s</sub> = " + parseFloat(expInfoByMethod[methodI][exampleI].seamLen).toFixed(3) +
+			    	sigmaText +
 			    	"&emsp; time = ");
 			    if(isNaN(expInfoByMethod[methodI][exampleI].time_world)) {
 			    	document.write('N/A');

@@ -2,6 +2,8 @@
 #include "IglUtils.hpp"
 #include "Optimizer.hpp"
 #include "SymDirichletEnergy.hpp"
+#include "SigmaBoundEnergy.hpp"
+#include "SigmaSmoothEnergy.hpp"
 #include "GIF.hpp"
 #include "Timer.hpp"
 
@@ -31,6 +33,97 @@
 #include <fstream>
 #include <string>
 #include <ctime>
+#include <sstream>
+#include <vector>
+
+// Number of nodes per element type in Gmsh MSH v2.2
+static int mshNodesPerElem(int type) {
+    switch(type) { case 1: return 2; case 2: return 3; case 3: return 4;
+                   case 4: return 4; case 5: return 8; case 15: return 1; default: return -1; }
+}
+// Gmsh MSH v2.2 reader (ASCII and binary): extracts surface triangles (element type 2)
+static bool readMSH(const std::string& path, Eigen::MatrixXd& V_out, Eigen::MatrixXi& F_out) {
+    std::ifstream in(path, std::ios::binary);
+    if (!in) return false;
+    bool isBinary = false;
+    std::string line;
+    std::vector<std::array<double,3>> nodes;
+    std::vector<std::array<int,3>> tris;
+
+    auto readline = [&]() { std::getline(in, line); if (!line.empty() && line.back()=='\r') line.pop_back(); };
+
+    while (std::getline(in, line)) {
+        if (!line.empty() && line.back()=='\r') line.pop_back();
+
+        if (line == "$MeshFormat") {
+            readline();
+            std::istringstream ss(line); double ver; int ftype, dsize;
+            ss >> ver >> ftype >> dsize;
+            isBinary = (ftype == 1);
+            if (isBinary) { int one; in.read(reinterpret_cast<char*>(&one), 4); readline(); } // skip newline
+            readline(); // $EndMeshFormat
+
+        } else if (line == "$Nodes") {
+            readline();
+            int n = std::stoi(line);
+            nodes.resize(n);
+            if (isBinary) {
+                for (int i = 0; i < n; ++i) {
+                    int id; in.read(reinterpret_cast<char*>(&id), 4);
+                    in.read(reinterpret_cast<char*>(nodes[i].data()), 24);
+                }
+                readline(); // newline before $EndNodes
+            } else {
+                for (int i = 0; i < n; ++i) {
+                    readline();
+                    std::istringstream ss2(line); int id;
+                    ss2 >> id >> nodes[i][0] >> nodes[i][1] >> nodes[i][2];
+                }
+            }
+
+        } else if (line == "$Elements") {
+            readline();
+            int ne = std::stoi(line);
+            if (isBinary) {
+                int read = 0;
+                while (read < ne) {
+                    int etype, count, ntags;
+                    in.read(reinterpret_cast<char*>(&etype),  4);
+                    in.read(reinterpret_cast<char*>(&count),  4);
+                    in.read(reinterpret_cast<char*>(&ntags),  4);
+                    int nn = mshNodesPerElem(etype);
+                    for (int i = 0; i < count; ++i) {
+                        int id; in.read(reinterpret_cast<char*>(&id), 4);
+                        for (int t = 0; t < ntags; ++t) { int tag; in.read(reinterpret_cast<char*>(&tag), 4); }
+                        std::vector<int> nids(nn < 0 ? 0 : nn);
+                        for (int j = 0; j < (int)nids.size(); ++j) in.read(reinterpret_cast<char*>(&nids[j]), 4);
+                        if (etype == 2) tris.push_back({nids[0]-1, nids[1]-1, nids[2]-1});
+                    }
+                    read += count;
+                }
+            } else {
+                for (int i = 0; i < ne; ++i) {
+                    readline();
+                    std::istringstream ss2(line); int id, etype, ntags;
+                    ss2 >> id >> etype >> ntags;
+                    for (int t = 0; t < ntags; ++t) { int tag; ss2 >> tag; }
+                    if (etype == 2) {
+                        int a, b, c; ss2 >> a >> b >> c;
+                        tris.push_back({a-1, b-1, c-1});
+                    }
+                }
+            }
+        }
+    }
+    if (nodes.empty() || tris.empty()) return false;
+    V_out.resize(nodes.size(), 3);
+    for (int i = 0; i < (int)nodes.size(); ++i)
+        V_out.row(i) << nodes[i][0], nodes[i][1], nodes[i][2];
+    F_out.resize(tris.size(), 3);
+    for (int i = 0; i < (int)tris.size(); ++i)
+        F_out.row(i) << tris[i][0], tris[i][1], tris[i][2];
+    return true;
+}
 
 
 Eigen::MatrixXd V, UV, N;
@@ -58,6 +151,8 @@ int initCutOption = 0;
 bool outerLoopFinished = false;
 double upperBound = 4.1;
 const double convTol_upperBound = 1.0e-3;
+double sigma1_ideal = 1.0;
+double sigma2_ideal = 1.0;
 
 std::vector<std::pair<double, double>> energyChanges_bSplit, energyChanges_iSplit, energyChanges_merge;
 std::vector<std::vector<int>> paths_bSplit, paths_iSplit, paths_merge;
@@ -75,7 +170,13 @@ std::string outputFolderPath = "output/";
 
 // visualization
 bool headlessMode = false;
+#ifndef OPTCUTS_PYTHON
 igl::opengl::glfw::Viewer viewer;
+#else
+// In Python mode, viewer is never used (headless); use raw storage to avoid GLFW init at import.
+static char viewer_storage[sizeof(igl::opengl::glfw::Viewer)];
+igl::opengl::glfw::Viewer& viewer = *reinterpret_cast<igl::opengl::glfw::Viewer*>(viewer_storage);
+#endif
 const int channel_initial = 0;
 const int channel_result = 1;
 const int channel_findExtrema = 2;
@@ -102,6 +203,17 @@ double GIFScale = 0.25;
 double secPast = 0.0;
 time_t lastStart_world;
 Timer timer, timer_step;
+
+#ifdef OPTCUTS_PYTHON
+Eigen::MatrixXd result_V_after_run;
+Eigen::MatrixXi result_F_after_run;
+int iterNum_after_run = 0;
+Eigen::VectorXd result_sigma1_after_run;
+Eigen::VectorXd result_sigma2_after_run;
+Eigen::VectorXd result_phi_after_run;
+Eigen::MatrixXi result_cohE_after_run;
+Eigen::MatrixXd result_V_rest_after_run;
+#endif
 
 
 void saveInfo(bool writePNG = true, bool writeGIF = true, bool writeMesh = true);
@@ -147,7 +259,7 @@ void updateViewerData_seam(Eigen::MatrixXd& V, Eigen::MatrixXi& F, Eigen::Matrix
         color.rowwise() = Eigen::RowVector3d(1.0, 0.5, 0.0);
         
         seamColor.resize(0, 3);
-        double seamThickness = (viewUV ? (triSoup[viewChannel]->virtualRadius * 0.0007 / viewer.core.model_zoom * texScale) :
+        double seamThickness = (viewUV ? (triSoup[viewChannel]->virtualRadius * 0.0007 / viewer.core().camera_zoom * texScale) :
                                 (triSoup[viewChannel]->virtualRadius * 0.006));
         for(int eI = 0; eI < triSoup[viewChannel]->cohE.rows(); eI++) {
             const Eigen::RowVector4i& cohE = triSoup[viewChannel]->cohE.row(eI);
@@ -225,7 +337,7 @@ void updateViewerData(void)
         }
         UV_vis.conservativeResize(UV_vis.rows(), 3);
         UV_vis.rightCols(1) = Eigen::VectorXd::Zero(UV_vis.rows());
-        viewer.core.align_camera_center(UV_vis, F_vis);
+        viewer.core().align_camera_center(UV_vis, F_vis);
         updateViewerData_seam(UV_vis, F_vis, UV_vis);
         
         if((UV_vis.rows() != viewer.data().V.rows()) ||
@@ -236,7 +348,7 @@ void updateViewerData(void)
         viewer.data().set_mesh(UV_vis, F_vis);
         
         viewer.data().show_texture = false;
-        viewer.core.lighting_factor = 0.0;
+        viewer.core().lighting_factor = 0.0;
 
         updateViewerData_meshEdges();
         
@@ -249,7 +361,7 @@ void updateViewerData(void)
     }
     else {
         Eigen::MatrixXd V_vis = triSoup[viewChannel]->V_rest;
-        viewer.core.align_camera_center(V_vis, F_vis);
+        viewer.core().align_camera_center(V_vis, F_vis);
         updateViewerData_seam(V_vis, F_vis, UV_vis);
         
         if((V_vis.rows() != viewer.data().V.rows()) ||
@@ -269,10 +381,10 @@ void updateViewerData(void)
         }
         
         if(isLighting) {
-            viewer.core.lighting_factor = 1.0;
+            viewer.core().lighting_factor = 1.0;
         }
         else {
-            viewer.core.lighting_factor = 0.0;
+            viewer.core().lighting_factor = 0.0;
         }
         
         updateViewerData_meshEdges();
@@ -300,8 +412,8 @@ void saveScreenshot(const std::string& filePath, double scale = 1.0, bool writeG
     }
     viewer.data().point_size = fracTailSize * scale;
     
-    int width = static_cast<int>(scale * (viewer.core.viewport[2] - viewer.core.viewport[0]));
-    int height = static_cast<int>(scale * (viewer.core.viewport[3] - viewer.core.viewport[1]));
+    int width = static_cast<int>(scale * (viewer.core().viewport[2] - viewer.core().viewport[0]));
+    int height = static_cast<int>(scale * (viewer.core().viewport[3] - viewer.core().viewport[1]));
     
     // Allocate temporary buffers for image
     Eigen::Matrix<unsigned char, Eigen::Dynamic, Eigen::Dynamic> R(width, height);
@@ -310,7 +422,7 @@ void saveScreenshot(const std::string& filePath, double scale = 1.0, bool writeG
     Eigen::Matrix<unsigned char, Eigen::Dynamic, Eigen::Dynamic> A(width, height);
     
     // Draw the scene in the buffers
-    viewer.core.draw_buffer(viewer.data(), false, R, G, B, A);
+    viewer.core().draw_buffer(viewer.data(), false, R, G, B, A);
     
     if(writePNG) {
         // Save it to a PNG
@@ -382,7 +494,9 @@ void saveInfoForPresent(const std::string fileName = "info.txt")
     
     file << "initialSeams " << triSoup[channel_result]->initSeams.rows() << std::endl;
     file << triSoup[channel_result]->initSeams << std::endl;
-    
+    double actual_max_sigma1 = 0.0, actual_max_sigma2 = 0.0;
+    OptCuts::SigmaBoundEnergy::getMaxSingularValues(*triSoup[channel_result], actual_max_sigma1, actual_max_sigma2);
+    file << "sigma_actual " << actual_max_sigma1 << " " << actual_max_sigma2 << std::endl;
     file.close();
 }
 
@@ -397,20 +511,20 @@ void toggleOptimization(void)
         else {
             if((!headlessMode) && (iterNum == 0)) {
                 GifBegin(&GIFWriter, (outputFolderPath + "anim.gif").c_str(),
-                         GIFScale * (viewer.core.viewport[2] - viewer.core.viewport[0]),
-                         GIFScale * (viewer.core.viewport[3] - viewer.core.viewport[1]), GIFDelay);
+                         GIFScale * (viewer.core().viewport[2] - viewer.core().viewport[0]),
+                         GIFScale * (viewer.core().viewport[3] - viewer.core().viewport[1]), GIFDelay);
                 
                 saveScreenshot(outputFolderPath + "0.png", 0.5, true);
             }
             std::cout << "start/resume optimization, press again to pause." << std::endl;
-            viewer.core.is_animating = true;
+            viewer.core().is_animating = true;
             
             time(&lastStart_world);
         }
     }
     else {
         std::cout << "pause optimization, press again to resume." << std::endl;
-        viewer.core.is_animating = false;
+        viewer.core().is_animating = false;
         std::cout << "World Time:\nTime past: " << secPast << "s." << std::endl;
         secPast += difftime(time(NULL), lastStart_world);
     }
@@ -503,7 +617,7 @@ bool postDrawFunc(igl::opengl::glfw::Viewer& viewer)
     
     if(outerLoopFinished) {
         if(!isCapture3D) {
-            viewer.core.is_animating = true;
+            viewer.core().is_animating = true;
             isCapture3D = true;
         }
         else {
@@ -524,7 +638,7 @@ bool postDrawFunc(igl::opengl::glfw::Viewer& viewer)
                     exit(0);
                 }
                 else {
-                    viewer.core.is_animating = false;
+                    viewer.core().is_animating = false;
                     isCapture3D = false;
                     outerLoopFinished = false;
                 }
@@ -876,6 +990,10 @@ bool updateLambda_stationaryV(bool cancelMomentum = true, bool checkConvergence 
     if(energyParams[0] < eps_lambda) {
         energyParams[0] = eps_lambda;
     }
+    // Sync E_smooth weight with E_d (same dual update)
+    if(energyParams.size() > 1) {
+        energyParams[1] = energyParams[0];
+    }
     
     optimizer->updateEnergyData(true, false, false);
     
@@ -904,7 +1022,7 @@ void converge_preDrawFunc(igl::opengl::glfw::Viewer& viewer)
     optimizer->flushGradFileOutput();
     
     optimization_on = false;
-    viewer.core.is_animating = false;
+    viewer.core().is_animating = false;
     std::cout << "optimization converged, with " << secPast << "s." << std::endl;
     logFile << "optimization converged, with " << secPast << "s." << std::endl;
     outerLoopFinished = true;
@@ -948,7 +1066,7 @@ bool preDrawFunc(igl::opengl::glfw::Viewer& viewer)
                         updateViewerData();
                         
                         optimization_on = false;
-                        viewer.core.is_animating = false;
+                        viewer.core().is_animating = false;
                         std::cout << "optimization converged, with " << secPast << "s." << std::endl;
                         logFile << "optimization converged, with " << secPast << "s." << std::endl;
                         outerLoopFinished = true;
@@ -1072,7 +1190,7 @@ bool preDrawFunc(igl::opengl::glfw::Viewer& viewer)
             else if((capture3DI / 2) == 5) {
                 rotAxis = -Eigen::Vector3f::UnitX();
             }
-            viewer.core.trackball_angle = Eigen::Quaternionf(Eigen::AngleAxisf(rotDeg, rotAxis));
+            viewer.core().trackball_angle = Eigen::Quaternionf(Eigen::AngleAxisf(rotDeg, rotAxis));
             viewChannel = channel_result;
             viewUV = false;
             showSeam = true;
@@ -1085,8 +1203,16 @@ bool preDrawFunc(igl::opengl::glfw::Viewer& viewer)
     return false;
 }
 
-int main(int argc, char *argv[])
+static void initTriSoup(const std::string& meshName, const std::string& folderTail,
+                        const std::string& startDS, double testID);
+
+// Entry point used by both standalone binary and Python module (when OPTCUTS_PYTHON is defined).
+int run_optcuts_main(int argc, char *argv[])
 {
+#ifdef OPTCUTS_PYTHON
+    // Construct the viewer here (not at global init time) to avoid GLFW crash on import.
+    new (&viewer_storage) igl::opengl::glfw::Viewer();
+#endif
     int progMode = 0;
     if(argc > 1) {
         progMode = std::stoi(argv[1]);
@@ -1151,6 +1277,9 @@ int main(int argc, char *argv[])
     }
     else if(suffix == ".obj") {
         loadSucceed = igl::readOBJ(meshFilePath, V, UV, N, F, FUV, FN);
+    }
+    else if(suffix == ".msh") {
+        loadSucceed = readMSH(meshFilePath, V, F);
     }
     else {
         std::cout << "unkown mesh file format!" << std::endl;
@@ -1278,9 +1407,17 @@ int main(int argc, char *argv[])
         bijectiveParam = std::stoi(argv[7]);
         std::cout << "bijectivity " << (bijectiveParam ? "ON" : "OFF") << std::endl;
     }
-    
     if(argc > 8) {
-        initCutOption = std::stoi(argv[8]);
+        sigma1_ideal = std::stod(argv[8]);
+    }
+    if(argc > 9) {
+        sigma2_ideal = std::stod(argv[9]);
+    }
+    if(argc > 10) {
+        initCutOption = std::stoi(argv[10]);
+    }
+    if(sigma1_ideal != 1.0 || sigma2_ideal != 1.0) {
+        std::cout << "Sigma ideal: sigma1_ideal = " << sigma1_ideal << ", sigma2_ideal = " << sigma2_ideal << std::endl;
     }
     switch(initCutOption) {
         case 0:
@@ -1299,20 +1436,129 @@ int main(int argc, char *argv[])
     }
     
     std::string folderTail = "";
-    if(argc > 9) {
-        if(argv[9][0] != '_') {
+    if(argc > 11) {
+        if(argv[11][0] != '_') {
             folderTail += '_';
         }
-        folderTail += argv[9];
+        folderTail += argv[11];
     }
 
     //////////////////////////////////
     // initialize UV
 
+    initTriSoup(meshName, folderTail, startDS, testID);
+
+    // initialize UV complete
+    //////////////////////////////////
+    
+    mkdir(outputFolderPath.c_str(), 0777);
+    outputFolderPath += '/';
+    igl::writeOBJ(outputFolderPath + "initial_cuts.obj", triSoup.back()->V_rest, triSoup.back()->F);
+    logFile.open(outputFolderPath + "log.txt");
+    if(!logFile.is_open()) {
+        std::cout << "failed to create log file, please ensure output directory is created successfully!" << std::endl;
+        return -1;
+    }
+    
+    // setup timer
+    timer.new_activity("topology");
+    timer.new_activity("descent");
+    timer.new_activity("scaffolding");
+    timer.new_activity("energyUpdate");
+    
+    timer_step.new_activity("matrixComputation");
+    timer_step.new_activity("matrixAssembly");
+    timer_step.new_activity("symbolicFactorization");
+    timer_step.new_activity("numericalFactorization");
+    timer_step.new_activity("backSolve");
+    timer_step.new_activity("lineSearch");
+    timer_step.new_activity("boundarySplit");
+    timer_step.new_activity("interiorSplit");
+    timer_step.new_activity("cornerMerge");
+    
+    // * Our approach
+    texScale = 10.0 / (triSoup[0]->bbox.row(1) - triSoup[0]->bbox.row(0)).maxCoeff();
+    energyParams.emplace_back(1.0 - lambda_init);
+    energyTerms.emplace_back(new OptCuts::SymDirichletEnergy(sigma1_ideal, sigma2_ideal));
+
+    optimizer = new OptCuts::Optimizer(*triSoup[0], energyTerms, energyParams, 0, false, bijectiveParam && !rand1PInitCut); // for random one point initial cut, don't need air meshes in the beginning since it's impossible for a quad to intersect itself
+    
+    optimizer->precompute();
+    triSoup.emplace_back(&optimizer->getResult());
+    triSoup_backup = optimizer->getResult();
+    triSoup.emplace_back(&optimizer->getData_findExtrema()); // for visualizing UV map for finding extrema
+    if(lambda_init > 0.0) {
+        // fracture mode
+        fractureMode = true;
+    }
+    
+    /////////////////////////////////////////////////////////////////////////////
+    // regional seam placement
+    std::ifstream vWFile(meshFolderPath + "/" + meshName + "_selected.txt");
+    if(vWFile.is_open()) {
+        while(!vWFile.eof()) {
+            int selected;
+            vWFile >> selected;
+            if(selected < optimizer->getResult().vertWeight.size()) {
+                optimizer->getResult().vertWeight[selected] = 100.0;
+            }
+        }
+        vWFile.close();
+        
+        OptCuts::IglUtils::smoothVertField(optimizer->getResult(),
+                                           optimizer->getResult().vertWeight);
+        
+        std::cout << "OptCuts with regional seam placement" << std::endl;
+    }
+    //////////////////////////////////////////////////////////////////////////////
+    
+    if(headlessMode) {
+        while(!outerLoopFinished) {
+            preDrawFunc(viewer);
+            postDrawFunc(viewer);
+        }
+    }
+    else {
+        // Setup viewer and launch
+        viewer.core().background_color << 1.0f, 1.0f, 1.0f, 0.0f;
+        viewer.callback_key_down = &key_down;
+        viewer.callback_pre_draw = &preDrawFunc;
+        viewer.callback_post_draw = &postDrawFunc;
+        viewer.data().show_lines = true;
+        viewer.core().orthographic = true;
+        viewer.core().camera_zoom *= 1.9;
+        viewer.core().animation_max_fps = 60.0;
+        viewer.data().point_size = fracTailSize;
+        viewer.data().show_overlay = true;
+        updateViewerData();
+        viewer.launch();
+    }
+    
+    // Before exit: save result for Python get_result_mesh() when built as module
+#ifdef OPTCUTS_PYTHON
+    result_V_after_run = optimizer->getResult().V;
+    result_F_after_run = optimizer->getResult().F;
+    iterNum_after_run = iterNum;
+    OptCuts::SigmaBoundEnergy::getSigmaFields(optimizer->getResult(),
+        result_sigma1_after_run, result_sigma2_after_run, result_phi_after_run);
+    result_cohE_after_run = optimizer->getResult().cohE;
+    result_V_rest_after_run = optimizer->getResult().V_rest;
+#endif
+    logFile.close();
+    for(auto& eI : energyTerms) {
+        delete eI;
+    }
+    delete optimizer;
+    delete triSoup[0];
+}
+
+static void initTriSoup(const std::string& meshName, const std::string& folderTail,
+                        const std::string& startDS, double testID)
+{
     if(UV.rows() != 0) {
         // with input UV
         OptCuts::TriMesh *temp = new OptCuts::TriMesh(V, F, UV, FUV, false);
-        
+
         std::vector<std::vector<int>> bnd_all;
         igl::boundary_loop(temp->F, bnd_all);
 
@@ -1330,7 +1576,7 @@ int main(int argc, char *argv[])
             std::cout << "local injectivity violated in given input UV map, " <<
                 "or multi-chart bijective UV map needs to be ensured, " <<
                 "obtaining new initial UV map by applying Tutte's embedding..." << std::endl;
-            
+
             int UVGridDim = 0;
             do {
                 ++UVGridDim;
@@ -1370,7 +1616,7 @@ int main(int argc, char *argv[])
                 exit(-1);
             }
         }
-        
+
         triSoup.emplace_back(temp);
         outputFolderPath += meshName + "_input_" + OptCuts::IglUtils::rtos(lambda_init) + "_" +
             OptCuts::IglUtils::rtos(testID) + "_" +startDS + folderTail;
@@ -1398,7 +1644,7 @@ int main(int argc, char *argv[])
             std::vector<int> components_to_cut;
             for(int componentI = 0; componentI < n_components; ++componentI) {
                 std::cout << ">>> component " << componentI << std::endl;
-                
+
                 int EC = igl::euler_characteristic(temp.V, F_component[componentI]) - temp.V.rows() + V_ind_component[componentI].size();
                 std::cout << "euler_characteristic " << EC << std::endl;
                 if (EC < 1) {
@@ -1428,7 +1674,7 @@ int main(int argc, char *argv[])
                     std::vector<std::vector<int>> cuts;
                     igl::cut_to_disk(F_component[componentI], cuts); // Meshes with boundary are supported; boundary edges will be included as cuts.
                     std::cout << cuts.size() << " seams to cut component " << componentI << std::endl;
-                    
+
                     // only cut one seam each time to avoid seam vertex id inconsistency
                     int cuts_made = 0;
                     for (auto& seamI : cuts) {
@@ -1457,11 +1703,11 @@ int main(int argc, char *argv[])
                         temp.onePointCut(F_component[componentI](0, 0));
                         rand1PInitCut = (n_components == 1);
                         break;
-                        
+
                     case 1:
                         temp.farthestPointCut(F_component[componentI](0, 0));
                         break;
-                        
+
                     default:
                         std::cout << "invalid initCutOption " << initCutOption << std::endl;
                         assert(0);
@@ -1495,11 +1741,11 @@ int main(int argc, char *argv[])
         Eigen::MatrixXd bnd_uv_stacked;
         for(int componentI = 0; componentI < n_components; ++componentI) {
             std::cout << ">>> component " << componentI << std::endl;
-            
+
             std::vector<std::vector<int>> bnd_all;
             igl::boundary_loop(F_component[componentI], bnd_all);
             std::cout << "boundary loop count " << bnd_all.size() << std::endl; // must be 1 for the current initial cut strategy
-            
+
             int longest_bnd_id = 0;
             for (int bnd_id = 1; bnd_id < bnd_all.size(); ++bnd_id) {
                 if (bnd_all[longest_bnd_id].size() < bnd_all[bnd_id].size()) {
@@ -1535,98 +1781,10 @@ int main(int argc, char *argv[])
         outputFolderPath += meshName + "_Tutte_" + OptCuts::IglUtils::rtos(lambda_init) + "_" + OptCuts::IglUtils::rtos(testID) +
             "_" + startDS + folderTail;
     }
-
-    // initialize UV
-    //////////////////////////////////
-    
-    mkdir(outputFolderPath.c_str(), 0777);
-    outputFolderPath += '/';
-    igl::writeOBJ(outputFolderPath + "initial_cuts.obj", triSoup.back()->V_rest, triSoup.back()->F);
-    logFile.open(outputFolderPath + "log.txt");
-    if(!logFile.is_open()) {
-        std::cout << "failed to create log file, please ensure output directory is created successfully!" << std::endl;
-        return -1;
-    }
-    
-    // setup timer
-    timer.new_activity("topology");
-    timer.new_activity("descent");
-    timer.new_activity("scaffolding");
-    timer.new_activity("energyUpdate");
-    
-    timer_step.new_activity("matrixComputation");
-    timer_step.new_activity("matrixAssembly");
-    timer_step.new_activity("symbolicFactorization");
-    timer_step.new_activity("numericalFactorization");
-    timer_step.new_activity("backSolve");
-    timer_step.new_activity("lineSearch");
-    timer_step.new_activity("boundarySplit");
-    timer_step.new_activity("interiorSplit");
-    timer_step.new_activity("cornerMerge");
-    
-    // * Our approach
-    texScale = 10.0 / (triSoup[0]->bbox.row(1) - triSoup[0]->bbox.row(0)).maxCoeff();
-    energyParams.emplace_back(1.0 - lambda_init);
-    energyTerms.emplace_back(new OptCuts::SymDirichletEnergy());
-    
-    optimizer = new OptCuts::Optimizer(*triSoup[0], energyTerms, energyParams, 0, false, bijectiveParam && !rand1PInitCut); // for random one point initial cut, don't need air meshes in the beginning since it's impossible for a quad to intersect itself
-    
-    optimizer->precompute();
-    triSoup.emplace_back(&optimizer->getResult());
-    triSoup_backup = optimizer->getResult();
-    triSoup.emplace_back(&optimizer->getData_findExtrema()); // for visualizing UV map for finding extrema
-    if(lambda_init > 0.0) {
-        // fracture mode
-        fractureMode = true;
-    }
-    
-    /////////////////////////////////////////////////////////////////////////////
-    // regional seam placement
-    std::ifstream vWFile(meshFolderPath + "/" + meshName + "_selected.txt");
-    if(vWFile.is_open()) {
-        while(!vWFile.eof()) {
-            int selected;
-            vWFile >> selected;
-            if(selected < optimizer->getResult().vertWeight.size()) {
-                optimizer->getResult().vertWeight[selected] = 100.0;
-            }
-        }
-        vWFile.close();
-        
-        OptCuts::IglUtils::smoothVertField(optimizer->getResult(),
-                                           optimizer->getResult().vertWeight);
-        
-        std::cout << "OptCuts with regional seam placement" << std::endl;
-    }
-    //////////////////////////////////////////////////////////////////////////////
-    
-    if(headlessMode) {
-        while(true) {
-            preDrawFunc(viewer);
-            postDrawFunc(viewer);
-        }
-    }
-    else {
-        // Setup viewer and launch
-        viewer.core.background_color << 1.0f, 1.0f, 1.0f, 0.0f;
-        viewer.callback_key_down = &key_down;
-        viewer.callback_pre_draw = &preDrawFunc;
-        viewer.callback_post_draw = &postDrawFunc;
-        viewer.data().show_lines = true;
-        viewer.core.orthographic = true;
-        viewer.core.camera_zoom *= 1.9;
-        viewer.core.animation_max_fps = 60.0;
-        viewer.data().point_size = fracTailSize;
-        viewer.data().show_overlay = true;
-        updateViewerData();
-        viewer.launch();
-    }
-    
-    // Before exit
-    logFile.close();
-    for(auto& eI : energyTerms) {
-        delete eI;
-    }
-    delete optimizer;
-    delete triSoup[0];
 }
+
+#ifndef OPTCUTS_PYTHON
+int main(int argc, char *argv[]) {
+    return run_optcuts_main(argc, argv);
+}
+#endif

@@ -9,6 +9,6 @@ onlyfiles = [f for f in listdir(meshFolderPath) if isfile(join(meshFolderPath, f
 FracCutsPath = 'build/OptCuts_bin'
 
 for inputModelNameI in onlyfiles:
-	runCommand = FracCutsPath + ' 10 ' + meshFolderPath + inputModelNameI + ' 0.999 1 0 4.1 1 0'
+	runCommand = FracCutsPath + ' 10 ' + meshFolderPath + inputModelNameI + ' 0.99 1 0 4.1 1 1.0 1.0 0' #σ=1.05
 	if subprocess.call([runCommand], shell=True):
 		continue

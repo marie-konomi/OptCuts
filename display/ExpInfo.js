@@ -9,4 +9,4 @@ function makeStruct(names) {
   }
   return constructor;
 }
-var ExpInfo = makeStruct("vertAmt faceAmt iterAmt topoIterAmt iterAmt_rb topoIterAmt_rb lambda_init lambda_conv time time_topo time_world time_step time_step_name E_SD seamLen stretch_L2 stretch_inf shear resultFolderName");
+var ExpInfo = makeStruct("vertAmt faceAmt iterAmt topoIterAmt iterAmt_rb topoIterAmt_rb lambda_init lambda_conv time time_topo time_world time_step time_step_name E_SD seamLen stretch_L2 stretch_inf shear sigma1_max sigma2_max resultFolderName");
