@@ -1203,6 +1203,9 @@ bool preDrawFunc(igl::opengl::glfw::Viewer& viewer)
     return false;
 }
 
+static void initTriSoup(const std::string& meshName, const std::string& folderTail,
+                        const std::string& startDS, double testID);
+
 // Entry point used by both standalone binary and Python module (when OPTCUTS_PYTHON is defined).
 int run_optcuts_main(int argc, char *argv[])
 {
@@ -1443,234 +1446,9 @@ int run_optcuts_main(int argc, char *argv[])
     //////////////////////////////////
     // initialize UV
 
-    if(UV.rows() != 0) {
-        // with input UV
-        OptCuts::TriMesh *temp = new OptCuts::TriMesh(V, F, UV, FUV, false);
-        
-        std::vector<std::vector<int>> bnd_all;
-        igl::boundary_loop(temp->F, bnd_all);
+    initTriSoup(meshName, folderTail, startDS, testID);
 
-        //TODO: check input UV genus (validity)
-        //right now OptCuts assumes input UV is a set of topological disks
-
-        bool recompute_UV_needed = !temp->checkInversion();
-        if ((!recompute_UV_needed) && bijectiveParam && (bnd_all.size() > 1)) {
-            //TODO: check overlaps and decide whether needs recompute UV
-            //needs to check even if bnd_all.size() == 1
-            //right now OptCuts take the input seams and recompute UV by default when bijective mapping is enabled
-            recompute_UV_needed = true;
-        }
-        if(recompute_UV_needed) {
-            std::cout << "local injectivity violated in given input UV map, " <<
-                "or multi-chart bijective UV map needs to be ensured, " <<
-                "obtaining new initial UV map by applying Tutte's embedding..." << std::endl;
-            
-            int UVGridDim = 0;
-            do {
-                ++UVGridDim;
-            } while(UVGridDim * UVGridDim < bnd_all.size());
-            std::cout << "UVGridDim " << UVGridDim << std::endl;
-
-            Eigen::VectorXi bnd_stacked;
-            Eigen::MatrixXd bnd_uv_stacked;
-            for(int bndI = 0; bndI < bnd_all.size(); bndI++) {
-                // map boundary to unit circle
-                bnd_stacked.conservativeResize(bnd_stacked.size() + bnd_all[bndI].size());
-                bnd_stacked.tail(bnd_all[bndI].size()) = Eigen::VectorXi::Map(bnd_all[bndI].data(),
-                                                                              bnd_all[bndI].size());
-
-                Eigen::MatrixXd bnd_uv;
-                igl::map_vertices_to_circle(temp->V_rest,
-                                            bnd_stacked.tail(bnd_all[bndI].size()),
-                                            bnd_uv);
-                double xOffset = bndI % UVGridDim * 2.1, yOffset = bndI / UVGridDim * 2.1;
-                for(int bnd_uvI = 0; bnd_uvI < bnd_uv.rows(); bnd_uvI++) {
-                    bnd_uv(bnd_uvI, 0) += xOffset;
-                    bnd_uv(bnd_uvI, 1) += yOffset;
-                }
-                bnd_uv_stacked.conservativeResize(bnd_uv_stacked.rows() + bnd_uv.rows(), 2);
-                bnd_uv_stacked.bottomRows(bnd_uv.rows()) = bnd_uv;
-            }
-
-            // Harmonic map with uniform weights
-            Eigen::SparseMatrix<double> A, M;
-            OptCuts::IglUtils::computeUniformLaplacian(temp->F, A);
-            igl::harmonic(A, M, bnd_stacked, bnd_uv_stacked, 1, temp->V);
-
-            if(!temp->checkInversion()) {
-                std::cout << "local injectivity still violated in the computed initial UV map, " <<
-                    "please carefully check UV topology for e.g. non-manifold vertices. " <<
-                    "Exit program..." << std::endl;
-                exit(-1);
-            }
-        }
-        
-        triSoup.emplace_back(temp);
-        outputFolderPath += meshName + "_input_" + OptCuts::IglUtils::rtos(lambda_init) + "_" +
-            OptCuts::IglUtils::rtos(testID) + "_" +startDS + folderTail;
-    }
-    else {
-        // no UV provided, compute initial UV
-
-        Eigen::VectorXi C;
-        igl::facet_components(F, C);
-        int n_components = C.maxCoeff() + 1;
-        std::cout << n_components << " disconnected components in total" << std::endl;
-
-        // in each pass, make one cut on each component if needed, until all becoming disk-topology
-        OptCuts::TriMesh temp(V, F, Eigen::MatrixXd(), Eigen::MatrixXi(), false);
-        std::vector<Eigen::MatrixXi> F_component(n_components);
-        std::vector<std::set<int>> V_ind_component(n_components);
-        for (int triI = 0; triI < temp.F.rows(); ++triI) {
-            F_component[C[triI]].conservativeResize(F_component[C[triI]].rows() + 1, 3);
-            F_component[C[triI]].bottomRows(1) = temp.F.row(triI);
-            for (int i = 0; i < 3; ++i) {
-                V_ind_component[C[triI]].insert(temp.F(triI, i));
-            }
-        }
-        while (true) {
-            std::vector<int> components_to_cut;
-            for(int componentI = 0; componentI < n_components; ++componentI) {
-                std::cout << ">>> component " << componentI << std::endl;
-                
-                int EC = igl::euler_characteristic(temp.V, F_component[componentI]) - temp.V.rows() + V_ind_component[componentI].size();
-                std::cout << "euler_characteristic " << EC << std::endl;
-                if (EC < 1) {
-                    // treat as higher-genus surfaces using cut_to_disk()
-                    components_to_cut.emplace_back(-componentI - 1);
-                }
-                else if (EC == 2) {
-                    // closed genus-0 surface
-                    components_to_cut.emplace_back(componentI);
-                }
-                else if (EC != 1) {
-                    std::cout << "unsupported single-connected component!" << std::endl;
-                    exit(-1);
-                }
-            }
-            std::cout << components_to_cut.size() << " components to cut to disk" << std::endl;
-
-            if (components_to_cut.empty()) {
-                break;
-            }
-
-            for (auto componentI: components_to_cut) {
-                if (componentI < 0) {
-                    // cut high genus
-                    componentI = -componentI - 1;
-
-                    std::vector<std::vector<int>> cuts;
-                    igl::cut_to_disk(F_component[componentI], cuts); // Meshes with boundary are supported; boundary edges will be included as cuts.
-                    std::cout << cuts.size() << " seams to cut component " << componentI << std::endl;
-                    
-                    // only cut one seam each time to avoid seam vertex id inconsistency
-                    int cuts_made = 0;
-                    for (auto& seamI : cuts) {
-                        if (seamI.front() == seamI.back()) {
-                            // cutPath() dos not support closed-loop cuts, split it into two cuts
-                            cuts_made += temp.cutPath(std::vector<int>({seamI[seamI.size() - 3], seamI[seamI.size() - 2], seamI[seamI.size() - 1]}), true);
-                            temp.initSeams = temp.cohE;
-                            seamI.resize(seamI.size() - 2);
-                        }
-                        cuts_made += temp.cutPath(seamI, true);
-                        temp.initSeams = temp.cohE;
-                        if (cuts_made) {
-                            break;
-                        }
-                    }
-
-                    if (!cuts_made) {
-                        std::cout << "FATAL ERROR: no cuts made when cutting input geometry to disk-topology!" << std::endl;
-                        exit(-1);
-                    }
-                }
-                else {
-                    // cut the topological sphere into a topological disk
-                    switch (initCutOption) {
-                    case 0:
-                        temp.onePointCut(F_component[componentI](0, 0));
-                        rand1PInitCut = (n_components == 1);
-                        break;
-                        
-                    case 1:
-                        temp.farthestPointCut(F_component[componentI](0, 0));
-                        break;
-                        
-                    default:
-                        std::cout << "invalid initCutOption " << initCutOption << std::endl;
-                        assert(0);
-                        break;
-                    }
-                }
-            }
-
-            // data update on each component for identifying a new cut
-            F_component.resize(0);
-            F_component.resize(n_components);
-            V_ind_component.resize(0);
-            V_ind_component.resize(n_components);
-            for (int triI = 0; triI < temp.F.rows(); ++triI) {
-                F_component[C[triI]].conservativeResize(F_component[C[triI]].rows() + 1, 3);
-                F_component[C[triI]].bottomRows(1) = temp.F.row(triI);
-                for (int i = 0; i < 3; ++i) {
-                    V_ind_component[C[triI]].insert(temp.F(triI, i));
-                }
-            }
-        }
-
-        int UVGridDim = 0;
-        do {
-            ++UVGridDim;
-        } while(UVGridDim * UVGridDim < n_components);
-        std::cout << "UVGridDim " << UVGridDim << std::endl;
-
-        // compute boundary UV coordinates, using a grid layout for muliComp
-        Eigen::VectorXi bnd_stacked;
-        Eigen::MatrixXd bnd_uv_stacked;
-        for(int componentI = 0; componentI < n_components; ++componentI) {
-            std::cout << ">>> component " << componentI << std::endl;
-            
-            std::vector<std::vector<int>> bnd_all;
-            igl::boundary_loop(F_component[componentI], bnd_all);
-            std::cout << "boundary loop count " << bnd_all.size() << std::endl; // must be 1 for the current initial cut strategy
-            
-            int longest_bnd_id = 0;
-            for (int bnd_id = 1; bnd_id < bnd_all.size(); ++bnd_id) {
-                if (bnd_all[longest_bnd_id].size() < bnd_all[bnd_id].size()) {
-                    longest_bnd_id = bnd_id;
-                }
-            }
-            std::cout << "longest_bnd_id " << longest_bnd_id << std::endl;
-
-            bnd_stacked.conservativeResize(bnd_stacked.size() + bnd_all[longest_bnd_id].size());
-            bnd_stacked.tail(bnd_all[longest_bnd_id].size()) = Eigen::VectorXi::Map(
-                bnd_all[longest_bnd_id].data(), bnd_all[longest_bnd_id].size());
-
-            Eigen::MatrixXd bnd_uv;
-            igl::map_vertices_to_circle(temp.V_rest,
-                                        bnd_stacked.tail(bnd_all[longest_bnd_id].size()),
-                                        bnd_uv);
-            double xOffset = componentI % UVGridDim * 2.1, yOffset = componentI / UVGridDim * 2.1;
-            for(int bnd_uvI = 0; bnd_uvI < bnd_uv.rows(); bnd_uvI++) {
-                bnd_uv(bnd_uvI, 0) += xOffset;
-                bnd_uv(bnd_uvI, 1) += yOffset;
-            }
-            bnd_uv_stacked.conservativeResize(bnd_uv_stacked.rows() + bnd_uv.rows(), 2);
-            bnd_uv_stacked.bottomRows(bnd_uv.rows()) = bnd_uv;
-        }
-
-        // Harmonic map with uniform weights
-        Eigen::MatrixXd UV_Tutte;
-        Eigen::SparseMatrix<double> A, M;
-        OptCuts::IglUtils::computeUniformLaplacian(temp.F, A);
-        igl::harmonic(A, M, bnd_stacked, bnd_uv_stacked, 1, UV_Tutte);
-
-        triSoup.emplace_back(new OptCuts::TriMesh(V, F, UV_Tutte, temp.F, false));
-        outputFolderPath += meshName + "_Tutte_" + OptCuts::IglUtils::rtos(lambda_init) + "_" + OptCuts::IglUtils::rtos(testID) +
-            "_" + startDS + folderTail;
-    }
-
-    // initialize UV
+    // initialize UV complete
     //////////////////////////////////
     
     mkdir(outputFolderPath.c_str(), 0777);
@@ -1702,8 +1480,6 @@ int run_optcuts_main(int argc, char *argv[])
     texScale = 10.0 / (triSoup[0]->bbox.row(1) - triSoup[0]->bbox.row(0)).maxCoeff();
     energyParams.emplace_back(1.0 - lambda_init);
     energyTerms.emplace_back(new OptCuts::SymDirichletEnergy(sigma1_ideal, sigma2_ideal));
-    energyParams.emplace_back(1.0 - lambda_init);
-    energyTerms.emplace_back(new OptCuts::SigmaSmoothEnergy());
 
     optimizer = new OptCuts::Optimizer(*triSoup[0], energyTerms, energyParams, 0, false, bijectiveParam && !rand1PInitCut); // for random one point initial cut, don't need air meshes in the beginning since it's impossible for a quad to intersect itself
     
@@ -1774,6 +1550,237 @@ int run_optcuts_main(int argc, char *argv[])
     }
     delete optimizer;
     delete triSoup[0];
+}
+
+static void initTriSoup(const std::string& meshName, const std::string& folderTail,
+                        const std::string& startDS, double testID)
+{
+    if(UV.rows() != 0) {
+        // with input UV
+        OptCuts::TriMesh *temp = new OptCuts::TriMesh(V, F, UV, FUV, false);
+
+        std::vector<std::vector<int>> bnd_all;
+        igl::boundary_loop(temp->F, bnd_all);
+
+        //TODO: check input UV genus (validity)
+        //right now OptCuts assumes input UV is a set of topological disks
+
+        bool recompute_UV_needed = !temp->checkInversion();
+        if ((!recompute_UV_needed) && bijectiveParam && (bnd_all.size() > 1)) {
+            //TODO: check overlaps and decide whether needs recompute UV
+            //needs to check even if bnd_all.size() == 1
+            //right now OptCuts take the input seams and recompute UV by default when bijective mapping is enabled
+            recompute_UV_needed = true;
+        }
+        if(recompute_UV_needed) {
+            std::cout << "local injectivity violated in given input UV map, " <<
+                "or multi-chart bijective UV map needs to be ensured, " <<
+                "obtaining new initial UV map by applying Tutte's embedding..." << std::endl;
+
+            int UVGridDim = 0;
+            do {
+                ++UVGridDim;
+            } while(UVGridDim * UVGridDim < bnd_all.size());
+            std::cout << "UVGridDim " << UVGridDim << std::endl;
+
+            Eigen::VectorXi bnd_stacked;
+            Eigen::MatrixXd bnd_uv_stacked;
+            for(int bndI = 0; bndI < bnd_all.size(); bndI++) {
+                // map boundary to unit circle
+                bnd_stacked.conservativeResize(bnd_stacked.size() + bnd_all[bndI].size());
+                bnd_stacked.tail(bnd_all[bndI].size()) = Eigen::VectorXi::Map(bnd_all[bndI].data(),
+                                                                              bnd_all[bndI].size());
+
+                Eigen::MatrixXd bnd_uv;
+                igl::map_vertices_to_circle(temp->V_rest,
+                                            bnd_stacked.tail(bnd_all[bndI].size()),
+                                            bnd_uv);
+                double xOffset = bndI % UVGridDim * 2.1, yOffset = bndI / UVGridDim * 2.1;
+                for(int bnd_uvI = 0; bnd_uvI < bnd_uv.rows(); bnd_uvI++) {
+                    bnd_uv(bnd_uvI, 0) += xOffset;
+                    bnd_uv(bnd_uvI, 1) += yOffset;
+                }
+                bnd_uv_stacked.conservativeResize(bnd_uv_stacked.rows() + bnd_uv.rows(), 2);
+                bnd_uv_stacked.bottomRows(bnd_uv.rows()) = bnd_uv;
+            }
+
+            // Harmonic map with uniform weights
+            Eigen::SparseMatrix<double> A, M;
+            OptCuts::IglUtils::computeUniformLaplacian(temp->F, A);
+            igl::harmonic(A, M, bnd_stacked, bnd_uv_stacked, 1, temp->V);
+
+            if(!temp->checkInversion()) {
+                std::cout << "local injectivity still violated in the computed initial UV map, " <<
+                    "please carefully check UV topology for e.g. non-manifold vertices. " <<
+                    "Exit program..." << std::endl;
+                exit(-1);
+            }
+        }
+
+        triSoup.emplace_back(temp);
+        outputFolderPath += meshName + "_input_" + OptCuts::IglUtils::rtos(lambda_init) + "_" +
+            OptCuts::IglUtils::rtos(testID) + "_" +startDS + folderTail;
+    }
+    else {
+        // no UV provided, compute initial UV
+
+        Eigen::VectorXi C;
+        igl::facet_components(F, C);
+        int n_components = C.maxCoeff() + 1;
+        std::cout << n_components << " disconnected components in total" << std::endl;
+
+        // in each pass, make one cut on each component if needed, until all becoming disk-topology
+        OptCuts::TriMesh temp(V, F, Eigen::MatrixXd(), Eigen::MatrixXi(), false);
+        std::vector<Eigen::MatrixXi> F_component(n_components);
+        std::vector<std::set<int>> V_ind_component(n_components);
+        for (int triI = 0; triI < temp.F.rows(); ++triI) {
+            F_component[C[triI]].conservativeResize(F_component[C[triI]].rows() + 1, 3);
+            F_component[C[triI]].bottomRows(1) = temp.F.row(triI);
+            for (int i = 0; i < 3; ++i) {
+                V_ind_component[C[triI]].insert(temp.F(triI, i));
+            }
+        }
+        while (true) {
+            std::vector<int> components_to_cut;
+            for(int componentI = 0; componentI < n_components; ++componentI) {
+                std::cout << ">>> component " << componentI << std::endl;
+
+                int EC = igl::euler_characteristic(temp.V, F_component[componentI]) - temp.V.rows() + V_ind_component[componentI].size();
+                std::cout << "euler_characteristic " << EC << std::endl;
+                if (EC < 1) {
+                    // treat as higher-genus surfaces using cut_to_disk()
+                    components_to_cut.emplace_back(-componentI - 1);
+                }
+                else if (EC == 2) {
+                    // closed genus-0 surface
+                    components_to_cut.emplace_back(componentI);
+                }
+                else if (EC != 1) {
+                    std::cout << "unsupported single-connected component!" << std::endl;
+                    exit(-1);
+                }
+            }
+            std::cout << components_to_cut.size() << " components to cut to disk" << std::endl;
+
+            if (components_to_cut.empty()) {
+                break;
+            }
+
+            for (auto componentI: components_to_cut) {
+                if (componentI < 0) {
+                    // cut high genus
+                    componentI = -componentI - 1;
+
+                    std::vector<std::vector<int>> cuts;
+                    igl::cut_to_disk(F_component[componentI], cuts); // Meshes with boundary are supported; boundary edges will be included as cuts.
+                    std::cout << cuts.size() << " seams to cut component " << componentI << std::endl;
+
+                    // only cut one seam each time to avoid seam vertex id inconsistency
+                    int cuts_made = 0;
+                    for (auto& seamI : cuts) {
+                        if (seamI.front() == seamI.back()) {
+                            // cutPath() dos not support closed-loop cuts, split it into two cuts
+                            cuts_made += temp.cutPath(std::vector<int>({seamI[seamI.size() - 3], seamI[seamI.size() - 2], seamI[seamI.size() - 1]}), true);
+                            temp.initSeams = temp.cohE;
+                            seamI.resize(seamI.size() - 2);
+                        }
+                        cuts_made += temp.cutPath(seamI, true);
+                        temp.initSeams = temp.cohE;
+                        if (cuts_made) {
+                            break;
+                        }
+                    }
+
+                    if (!cuts_made) {
+                        std::cout << "FATAL ERROR: no cuts made when cutting input geometry to disk-topology!" << std::endl;
+                        exit(-1);
+                    }
+                }
+                else {
+                    // cut the topological sphere into a topological disk
+                    switch (initCutOption) {
+                    case 0:
+                        temp.onePointCut(F_component[componentI](0, 0));
+                        rand1PInitCut = (n_components == 1);
+                        break;
+
+                    case 1:
+                        temp.farthestPointCut(F_component[componentI](0, 0));
+                        break;
+
+                    default:
+                        std::cout << "invalid initCutOption " << initCutOption << std::endl;
+                        assert(0);
+                        break;
+                    }
+                }
+            }
+
+            // data update on each component for identifying a new cut
+            F_component.resize(0);
+            F_component.resize(n_components);
+            V_ind_component.resize(0);
+            V_ind_component.resize(n_components);
+            for (int triI = 0; triI < temp.F.rows(); ++triI) {
+                F_component[C[triI]].conservativeResize(F_component[C[triI]].rows() + 1, 3);
+                F_component[C[triI]].bottomRows(1) = temp.F.row(triI);
+                for (int i = 0; i < 3; ++i) {
+                    V_ind_component[C[triI]].insert(temp.F(triI, i));
+                }
+            }
+        }
+
+        int UVGridDim = 0;
+        do {
+            ++UVGridDim;
+        } while(UVGridDim * UVGridDim < n_components);
+        std::cout << "UVGridDim " << UVGridDim << std::endl;
+
+        // compute boundary UV coordinates, using a grid layout for muliComp
+        Eigen::VectorXi bnd_stacked;
+        Eigen::MatrixXd bnd_uv_stacked;
+        for(int componentI = 0; componentI < n_components; ++componentI) {
+            std::cout << ">>> component " << componentI << std::endl;
+
+            std::vector<std::vector<int>> bnd_all;
+            igl::boundary_loop(F_component[componentI], bnd_all);
+            std::cout << "boundary loop count " << bnd_all.size() << std::endl; // must be 1 for the current initial cut strategy
+
+            int longest_bnd_id = 0;
+            for (int bnd_id = 1; bnd_id < bnd_all.size(); ++bnd_id) {
+                if (bnd_all[longest_bnd_id].size() < bnd_all[bnd_id].size()) {
+                    longest_bnd_id = bnd_id;
+                }
+            }
+            std::cout << "longest_bnd_id " << longest_bnd_id << std::endl;
+
+            bnd_stacked.conservativeResize(bnd_stacked.size() + bnd_all[longest_bnd_id].size());
+            bnd_stacked.tail(bnd_all[longest_bnd_id].size()) = Eigen::VectorXi::Map(
+                bnd_all[longest_bnd_id].data(), bnd_all[longest_bnd_id].size());
+
+            Eigen::MatrixXd bnd_uv;
+            igl::map_vertices_to_circle(temp.V_rest,
+                                        bnd_stacked.tail(bnd_all[longest_bnd_id].size()),
+                                        bnd_uv);
+            double xOffset = componentI % UVGridDim * 2.1, yOffset = componentI / UVGridDim * 2.1;
+            for(int bnd_uvI = 0; bnd_uvI < bnd_uv.rows(); bnd_uvI++) {
+                bnd_uv(bnd_uvI, 0) += xOffset;
+                bnd_uv(bnd_uvI, 1) += yOffset;
+            }
+            bnd_uv_stacked.conservativeResize(bnd_uv_stacked.rows() + bnd_uv.rows(), 2);
+            bnd_uv_stacked.bottomRows(bnd_uv.rows()) = bnd_uv;
+        }
+
+        // Harmonic map with uniform weights
+        Eigen::MatrixXd UV_Tutte;
+        Eigen::SparseMatrix<double> A, M;
+        OptCuts::IglUtils::computeUniformLaplacian(temp.F, A);
+        igl::harmonic(A, M, bnd_stacked, bnd_uv_stacked, 1, UV_Tutte);
+
+        triSoup.emplace_back(new OptCuts::TriMesh(V, F, UV_Tutte, temp.F, false));
+        outputFolderPath += meshName + "_Tutte_" + OptCuts::IglUtils::rtos(lambda_init) + "_" + OptCuts::IglUtils::rtos(testID) +
+            "_" + startDS + folderTail;
+    }
 }
 
 #ifndef OPTCUTS_PYTHON
